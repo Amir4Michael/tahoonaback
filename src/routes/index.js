@@ -13,6 +13,7 @@ import auditLogRoute from './auditLog.route.js';
 import activityRoute from './activity.route.js';
 import settingsRoute from './settings.route.js';
 import uploadRoute from './upload.route.js';
+import adminRoute from './admin.route.js';
 
 const router = Router();
 
@@ -30,5 +31,10 @@ router.use('/audit-log', auditLogRoute);
 router.use('/activity', activityRoute);
 router.use('/settings', settingsRoute);
 router.use('/uploads', uploadRoute);
+
+// Separate, self-contained, GET-only read model for the future System 5 —
+// gated by its own key (requireAdminReadKey), never by the shop's own
+// login. See src/middleware/adminAccess.js and src/routes/admin.route.js.
+router.use('/admin', adminRoute);
 
 export default router;

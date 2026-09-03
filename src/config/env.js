@@ -36,6 +36,22 @@ const envSchema = z.object({
   CLOUDINARY_API_KEY: z.string().trim().optional(),
   CLOUDINARY_API_SECRET: z.string().trim().optional(),
   CLOUDINARY_UPLOAD_FOLDER: z.string().trim().optional().default('system1/products'),
+
+  // ── Central read-only reporting access (future System 5) ──────────────────
+  // A single static key, completely separate from the shop's own JWT/device
+  // login above, that grants GET-only access to the /api/admin/* routes (see
+  // src/middleware/adminAccess.js and src/routes/admin.route.js). Deliberately
+  // NOT reusing the shop's auth: that system is built around "one shop, one
+  // password, up to 2 devices" and has no concept of a read-only role, so
+  // bending it to also serve a cross-shop reporting system would tangle two
+  // unrelated concerns. Optional here — if unset, every /api/admin/* request
+  // is rejected with 503, so a system with no need for System 5 yet simply
+  // doesn't configure it. Generate with the same command as JWT_ACCESS_SECRET.
+  ADMIN_READONLY_KEY: z
+    .string()
+    .trim()
+    .optional()
+    .transform((value) => (value ? value : undefined)),
 });
 
 const parsed = envSchema.safeParse(process.env);
