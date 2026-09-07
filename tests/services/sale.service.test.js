@@ -151,6 +151,178 @@ describe('createSale — custom pricing', () => {
   });
 });
 
+describe('createSale — discount', () => {
+  it('creates a sale with no discount exactly like before the feature existed (subtotal === total, discount = 0)', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100, purchasePrice: 60 })));
+    const sale = await createSale({ items: [{ productId: 'p1', quantity: 2 }], paymentMethod: 'cash' });
+    expect(sale.subtotal).toBe(200);
+    expect(sale.discount).toBe(0);
+    expect(sale.total).toBe(200);
+    expect(sale.profit).toBe(80);
+  });
+
+  it('applies a flat discount to the invoice total without touching line prices', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100, purchasePrice: 60 })));
+    const sale = await createSale({ items: [{ productId: 'p1', quantity: 2 }], paymentMethod: 'cash', discount: 50 });
+    expect(sale.items[0].price).toBe(100); // line price untouched by the discount
+    expect(sale.subtotal).toBe(200);
+    expect(sale.discount).toBe(50);
+    expect(sale.total).toBe(150); // 200 - 50
+    expect(sale.paid).toBe(150); // cash: paid = total (post-discount)
+  });
+
+  it('reduces profit by the discount amount (discount comes off actual revenue, not cost basis)', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100, purchasePrice: 60 })));
+    const sale = await createSale({ items: [{ productId: 'p1', quantity: 2 }], paymentMethod: 'cash', discount: 50 });
+    // gross profit = 2*(100-60) = 80; net profit = 80 - 50 discount = 30
+    expect(sale.profit).toBe(30);
+  });
+
+  it('treats an explicit discount of 0 exactly like no discount at all', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100, purchasePrice: 60 })));
+    const sale = await createSale({ items: [{ productId: 'p1', quantity: 1 }], paymentMethod: 'cash', discount: 0 });
+    expect(sale.discount).toBe(0);
+    expect(sale.total).toBe(100);
+  });
+
+  it('treats an empty-string discount as "no discount", not zero applied twice or NaN', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100 })));
+    const sale = await createSale({ items: [{ productId: 'p1', quantity: 1 }], paymentMethod: 'cash', discount: '' });
+    expect(sale.discount).toBe(0);
+    expect(sale.total).toBe(100);
+  });
+
+  it('rejects a discount greater than the subtotal, without touching stock', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100, quantity: 10 })));
+    await expect(
+      createSale({ items: [{ productId: 'p1', quantity: 1 }], paymentMethod: 'cash', discount: 150 }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    expect(productMocks.updateOne).not.toHaveBeenCalled();
+  });
+
+  it('rejects a negative discount even if it somehow reaches the service directly', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100 })));
+    await expect(
+      createSale({ items: [{ productId: 'p1', quantity: 1 }], paymentMethod: 'cash', discount: -10 }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it('rejects a non-numeric discount', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100 })));
+    await expect(
+      createSale({ items: [{ productId: 'p1', quantity: 1 }], paymentMethod: 'cash', discount: 'abc' }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it('allows a discount exactly equal to the subtotal (final total = 0)', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100 })));
+    const sale = await createSale({ items: [{ productId: 'p1', quantity: 1 }], paymentMethod: 'cash', discount: 100 });
+    expect(sale.total).toBe(0);
+    expect(sale.paid).toBe(0);
+    expect(sale.remaining).toBe(0);
+  });
+
+  it('re-validates paid against the post-discount total, not the pre-discount subtotal', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100 })));
+    // subtotal=100, discount=30 -> total=70; paying 80 (> total, but < subtotal) must be rejected.
+    await expect(
+      createSale({
+        items: [{ productId: 'p1', quantity: 1 }],
+        paymentMethod: 'credit',
+        customerId: 'c1',
+        discount: 30,
+        paid: 80,
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it('does not trust a client-sent total — recomputes subtotal from validated lines regardless of what was passed', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100, purchasePrice: 60 })));
+    // No `total` field is even accepted by createSale's signature — this
+    // asserts the computed subtotal/total come from the line qty*price,
+    // not from anything the caller could have injected.
+    const sale = await createSale({
+      items: [{ productId: 'p1', quantity: 3 }],
+      paymentMethod: 'cash',
+      discount: 20,
+      total: 999999, // not a recognized param — must be ignored entirely
+    });
+    expect(sale.subtotal).toBe(300);
+    expect(sale.total).toBe(280);
+  });
+
+  it('still decrements stock normally when a discount is applied (discount never touches inventory)', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ id: 'p1', salePrice: 100, quantity: 10 })));
+    await createSale({ items: [{ productId: 'p1', quantity: 4 }], paymentMethod: 'cash', discount: 50 });
+    expect(productMocks.updateOne).toHaveBeenCalledWith(
+      { _id: 'p1', quantity: { $gte: 4 } },
+      { $inc: { quantity: -4 } },
+      { session },
+    );
+  });
+
+  it('records the discount and subtotal in the audit log', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100 })));
+    await createSale({ items: [{ productId: 'p1', quantity: 2 }], paymentMethod: 'cash', discount: 20 });
+    expect(auditMocks.recordAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        values: expect.objectContaining({ subtotal: 200, discount: 20, total: 180 }),
+      }),
+      { session: SESSION_TOKEN },
+    );
+  });
+});
+
+describe('createSale — customer linkage (Customer is a distinct entity, never auto-created)', () => {
+  // Customer.js is mocked above with ONLY `.collection.name` (used for the
+  // search $lookup in listSales) — no `.create`/`.findById`/`.save`. If
+  // createSale ever tried to create or touch a Customer document as a
+  // side effect of selling something, calling an undefined method on this
+  // mock would throw and fail these tests immediately.
+  it('stores the given customerId as-is on the sale — never creates, looks up, or mutates a Customer document', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100 })));
+    const sale = await createSale({
+      items: [{ productId: 'p1', quantity: 1 }],
+      paymentMethod: 'credit',
+      customerId: 'cust-ahmed',
+      paid: 50,
+    });
+    expect(sale.customerId).toBe('cust-ahmed');
+  });
+
+  it('links two separate sales for the same customer to the identical customerId (no duplication, no per-sale identity drift)', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100 })));
+
+    sequenceMocks.nextSequence.mockResolvedValueOnce('INV-1001');
+    const firstSale = await createSale({
+      items: [{ productId: 'p1', quantity: 1 }],
+      paymentMethod: 'credit',
+      customerId: 'cust-ahmed',
+      paid: 100,
+    });
+
+    sequenceMocks.nextSequence.mockResolvedValueOnce('INV-1002');
+    const secondSale = await createSale({
+      items: [{ productId: 'p1', quantity: 2 }],
+      paymentMethod: 'credit',
+      customerId: 'cust-ahmed',
+      paid: 200,
+    });
+
+    // Same customerId on both invoices — one customer, two invoices, exactly
+    // as a real "same person buys again later" scenario should look.
+    expect(firstSale.customerId).toBe('cust-ahmed');
+    expect(secondSale.customerId).toBe('cust-ahmed');
+    expect(firstSale.invoiceNumber).not.toBe(secondSale.invoiceNumber);
+  });
+
+  it('accepts null customerId for a walk-in/cash sale without touching Customer at all', async () => {
+    productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100 })));
+    const sale = await createSale({ items: [{ productId: 'p1', quantity: 1 }], paymentMethod: 'cash', customerId: null });
+    expect(sale.customerId).toBeNull();
+  });
+});
+
 describe('createSale — payment amount', () => {
   it('cash payment forces paid = total regardless of any paid input', async () => {
     productMocks.findById.mockReturnValue(findByIdQuery(makeProduct({ salePrice: 100 })));

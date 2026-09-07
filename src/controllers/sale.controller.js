@@ -13,7 +13,7 @@ export const getOne = asyncHandler(async (req, res) => {
 });
 
 export const create = asyncHandler(async (req, res) => {
-  const { customerId, items, paymentMethod, paid } = req.body;
-  const sale = await saleService.createSale({ customerId: customerId || null, items, paymentMethod, paid });
+  const { customerId, items, paymentMethod, paid, discount } = req.body;
+  const sale = await saleService.createSale({ customerId: customerId || null, items, paymentMethod, paid, discount });
   res.status(201).json({ success: true, data: sale });
 });

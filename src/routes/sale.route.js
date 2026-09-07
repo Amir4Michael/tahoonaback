@@ -35,6 +35,11 @@ const createSaleSchema = z
     items: z.array(saleItemSchema).min(1, 'الفاتورة فارغة، أضف منتجات أولاً'),
     paymentMethod: z.enum(['cash', 'credit']),
     paid: z.coerce.number().optional(),
+    // Flat (fixed-amount) invoice-level discount. Shape/sign check only —
+    // the real rule (discount <= subtotal) needs the priced lines, which
+    // only exist after the service reads each product, so it's enforced
+    // there (see sale.service.js).
+    discount: z.coerce.number().min(0, 'قيمة الخصم غير صحيحة').optional(),
   })
   .refine((data) => !(data.paymentMethod === 'credit' && !data.customerId), {
     message: 'اختر عميلاً لإتمام البيع بالآجل',

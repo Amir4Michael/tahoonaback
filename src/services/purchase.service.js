@@ -8,6 +8,7 @@ import { nextSequence } from './sequence.service.js';
 import { recordActivity } from './activityLog.service.js';
 import { recordAuditLog } from './auditLog.service.js';
 import { withTransaction } from '../utils/transactions.js';
+import { round2 } from '../models/shared/money.js';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -28,8 +29,16 @@ function escapeRegex(str) {
  * Mirrors the frontend's addPurchaseSvc validation order and messages
  * exactly: no supplier -> empty items -> per-line checks (existence,
  * quantity, price) -> payment amount checks.
+ *
+ * `discount` is a FLAT (fixed-amount) reduction on the purchase's
+ * `subtotal` as a whole — it is never distributed across `items[]`, so
+ * every line's `price` (which FEEDS the weighted-average cost recalculation
+ * on the product below) always stays the actual per-unit price paid in this
+ * batch. The client's `total`/`discount` are never trusted: `subtotal` is
+ * recomputed here from the validated lines, and `discount` is re-validated
+ * against that recomputed `subtotal`.
  */
-export async function createPurchase({ supplierId, items, paymentMethod, paid, date, notes }) {
+export async function createPurchase({ supplierId, items, paymentMethod, paid, date, notes, discount }) {
   if (!supplierId) {
     throw new AppError('اختر المورد أولاً', 400);
   }
@@ -51,11 +60,25 @@ export async function createPurchase({ supplierId, items, paymentMethod, paid, d
       lines.push({ productId: product._id, name: product.name, code: product.code, price, quantity: qty });
     }
 
-    const total = lines.reduce((s, l) => s + l.price * l.quantity, 0);
+    const subtotal = round2(lines.reduce((s, l) => s + l.price * l.quantity, 0));
+
+    // Discount defaults to 0 (no discount) when omitted — matches every
+    // purchase created before this feature existed. Same '' / null /
+    // undefined -> "no discount" handling as the sale-side discount.
+    const hasDiscount = discount !== undefined && discount !== null && discount !== '';
+    const discountNum = hasDiscount ? round2(Number(discount)) : 0;
+    if (Number.isNaN(discountNum) || discountNum < 0) {
+      throw new AppError('قيمة الخصم غير صحيحة', 400);
+    }
+    if (discountNum > subtotal) {
+      throw new AppError('الخصم أكبر من إجمالي العملية', 400);
+    }
+
+    const total = round2(subtotal - discountNum);
     const paidNum = paymentMethod === 'cash' ? total : Number(paid);
     if (Number.isNaN(paidNum) || paidNum < 0) throw new AppError('المبلغ المدفوع غير صحيح', 400);
     if (paidNum > total) throw new AppError('المبلغ المدفوع أكبر من إجمالي العملية', 400);
-    const remaining = total - paidNum;
+    const remaining = round2(total - paidNum);
 
     // Weighted-average cost, computed via a MongoDB aggregation-pipeline
     // update (the array form of the `update` argument) rather than a
@@ -119,6 +142,8 @@ export async function createPurchase({ supplierId, items, paymentMethod, paid, d
         purchaseNumber,
         supplierId,
         items: lines,
+        subtotal,
+        discount: discountNum,
         total,
         paid: paidNum,
         remaining,
@@ -161,6 +186,8 @@ export async function createPurchase({ supplierId, items, paymentMethod, paid, d
         values: {
           purchaseNumber: createdPurchase.purchaseNumber,
           supplierId: createdPurchase.supplierId,
+          subtotal,
+          discount: discountNum,
           total,
           paid: paidNum,
           remaining,

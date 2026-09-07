@@ -13,7 +13,7 @@ export const getOne = asyncHandler(async (req, res) => {
 });
 
 export const create = asyncHandler(async (req, res) => {
-  const { supplierId, items, paymentMethod, paid, date, notes } = req.body;
-  const purchase = await purchaseService.createPurchase({ supplierId, items, paymentMethod, paid, date, notes });
+  const { supplierId, items, paymentMethod, paid, date, notes, discount } = req.body;
+  const purchase = await purchaseService.createPurchase({ supplierId, items, paymentMethod, paid, date, notes, discount });
   res.status(201).json({ success: true, data: purchase });
 });

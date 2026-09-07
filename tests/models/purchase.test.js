@@ -54,6 +54,31 @@ describe('Purchase schema', () => {
     expect(p.notes).toBe('');
   });
 
+  it('defaults subtotal to total when omitted (no-discount purchases built before this field existed)', () => {
+    const p = new Purchase(validPurchase());
+    expect(p.subtotal).toBe(p.total);
+  });
+
+  it('defaults discount to 0 when omitted', () => {
+    const p = new Purchase(validPurchase());
+    expect(p.discount).toBe(0);
+  });
+
+  it('accepts an explicit subtotal/discount pair', () => {
+    const err = new Purchase({ ...validPurchase(), subtotal: 120, discount: 30, total: 90 }).validateSync();
+    expect(err).toBeUndefined();
+  });
+
+  it('rejects a negative discount', () => {
+    const err = new Purchase({ ...validPurchase(), discount: -5 }).validateSync();
+    expect(err.errors.discount).toBeDefined();
+  });
+
+  it('rejects a negative subtotal', () => {
+    const err = new Purchase({ ...validPurchase(), subtotal: -5 }).validateSync();
+    expect(err.errors.subtotal).toBeDefined();
+  });
+
   it('declares a unique index on purchaseNumber', () => {
     const idx = findIndex(Purchase, { purchaseNumber: 1 });
     expect(idx).toBeDefined();

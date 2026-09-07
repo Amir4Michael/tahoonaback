@@ -75,6 +75,37 @@ describe('Sale schema', () => {
     expect(err.errors.remaining).toBeDefined();
   });
 
+  it('defaults subtotal to total when omitted (no-discount sales built before this field existed)', () => {
+    const sale = new Sale(validSale());
+    expect(sale.subtotal).toBe(sale.total);
+  });
+
+  it('defaults discount to 0 when omitted', () => {
+    const sale = new Sale(validSale());
+    expect(sale.discount).toBe(0);
+  });
+
+  it('accepts an explicit subtotal/discount pair (subtotal - discount need not be re-validated here — that cross-field rule lives in the service layer)', () => {
+    const err = new Sale({ ...validSale(), subtotal: 300, discount: 60, total: 240 }).validateSync();
+    expect(err).toBeUndefined();
+  });
+
+  it('rejects a negative discount', () => {
+    const err = new Sale({ ...validSale(), discount: -5 }).validateSync();
+    expect(err.errors.discount).toBeDefined();
+  });
+
+  it('rejects a negative subtotal', () => {
+    const err = new Sale({ ...validSale(), subtotal: -5 }).validateSync();
+    expect(err.errors.subtotal).toBeDefined();
+  });
+
+  it('rounds subtotal/discount to 2 decimal places like every other money field', () => {
+    const sale = new Sale({ ...validSale(), subtotal: 100.999, discount: 10.005 });
+    expect(sale.subtotal).toBe(101);
+    expect(sale.discount).toBe(10.01);
+  });
+
   it('does not give line items their own _id (plain snapshot, not an entity)', () => {
     const sale = new Sale(validSale());
     expect(sale.items[0]._id).toBeUndefined();

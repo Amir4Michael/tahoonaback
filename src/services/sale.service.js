@@ -8,6 +8,7 @@ import { nextSequence } from './sequence.service.js';
 import { recordActivity } from './activityLog.service.js';
 import { recordAuditLog } from './auditLog.service.js';
 import { withTransaction } from '../utils/transactions.js';
+import { round2 } from '../models/shared/money.js';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -31,8 +32,17 @@ function escapeRegex(str) {
  * Mirrors the frontend's completeSaleSvc validation order and messages
  * exactly: empty cart -> credit-without-customer -> per-line checks
  * (existence, quantity, price) -> payment amount checks.
+ *
+ * `discount` is a FLAT (fixed-amount) reduction on the invoice's `subtotal`
+ * as a whole — it is never distributed across `items[]`, so every line's
+ * `price` always stays the actual per-unit price the product sold at (the
+ * historical-integrity rule above still holds for lines; only the invoice's
+ * own total is adjusted). The client's `total`/`discount` are never trusted:
+ * `subtotal` is recomputed here from the validated lines, and `discount` is
+ * re-validated against that recomputed `subtotal`, not whatever the client
+ * sent for `total`.
  */
-export async function createSale({ customerId, items, paymentMethod, paid }) {
+export async function createSale({ customerId, items, paymentMethod, paid, discount }) {
   if (!items || items.length === 0) {
     throw new AppError('الفاتورة فارغة، أضف منتجات أولاً', 400);
   }
@@ -71,13 +81,30 @@ export async function createSale({ customerId, items, paymentMethod, paid }) {
       });
     }
 
-    const total = lines.reduce((s, l) => s + l.price * l.quantity, 0);
-    const profit = lines.reduce((s, l) => s + (l.price - l.cost) * l.quantity, 0);
+    const subtotal = round2(lines.reduce((s, l) => s + l.price * l.quantity, 0));
+    const grossProfit = lines.reduce((s, l) => s + (l.price - l.cost) * l.quantity, 0);
+
+    // Discount defaults to 0 (no discount) when omitted — matches every
+    // sale created before this feature existed. Same '' / null / undefined
+    // -> "no discount" handling as the per-line custom price above.
+    const hasDiscount = discount !== undefined && discount !== null && discount !== '';
+    const discountNum = hasDiscount ? round2(Number(discount)) : 0;
+    if (Number.isNaN(discountNum) || discountNum < 0) {
+      throw new AppError('قيمة الخصم غير صحيحة', 400);
+    }
+    if (discountNum > subtotal) {
+      throw new AppError('الخصم أكبر من إجمالي الفاتورة', 400);
+    }
+
+    const total = round2(subtotal - discountNum);
+    // The discount reduces actual revenue for this invoice, so it comes off
+    // profit too (cost basis of the lines is unaffected by it).
+    const profit = round2(grossProfit - discountNum);
 
     const paidNum = paymentMethod === 'cash' ? total : Number(paid);
     if (Number.isNaN(paidNum) || paidNum < 0) throw new AppError('المبلغ المدفوع غير صحيح', 400);
     if (paidNum > total) throw new AppError('المبلغ المدفوع أكبر من إجمالي الفاتورة', 400);
-    const remaining = total - paidNum;
+    const remaining = round2(total - paidNum);
 
     // Atomic, guarded decrement per line: re-checks availability at WRITE
     // time (the $gte guard), not just against the read taken above. This
@@ -104,6 +131,8 @@ export async function createSale({ customerId, items, paymentMethod, paid }) {
         invoiceNumber,
         customerId: customerId || null,
         items: lines,
+        subtotal,
+        discount: discountNum,
         total,
         paid: paidNum,
         remaining,
@@ -140,6 +169,8 @@ export async function createSale({ customerId, items, paymentMethod, paid }) {
         values: {
           invoiceNumber: createdSale.invoiceNumber,
           customerId: createdSale.customerId,
+          subtotal,
+          discount: discountNum,
           total,
           paid: paidNum,
           remaining,

@@ -116,6 +116,41 @@ describe('POST /api/sales', () => {
     expect(res.body.data.invoiceNumber).toBe('INV-1001');
   });
 
+  it('rejects a negative discount at the validation layer, before calling the service', async () => {
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/sales')
+      .set(authHeader())
+      .send({ items: [{ productId: validId(), quantity: 1 }], paymentMethod: 'cash', discount: -10 });
+    expect(res.status).toBe(400);
+    expect(saleService.createSale).not.toHaveBeenCalled();
+  });
+
+  it('passes a valid discount through to the service', async () => {
+    saleService.createSale.mockResolvedValue({ invoiceNumber: 'INV-2', total: 90, discount: 10 });
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/sales')
+      .set(authHeader())
+      .send({ items: [{ productId: validId(), quantity: 1 }], paymentMethod: 'cash', discount: 10 });
+    expect(res.status).toBe(201);
+    const [callArg] = saleService.createSale.mock.calls[0];
+    expect(callArg.discount).toBe(10);
+  });
+
+  it('propagates a 400 from the service when the discount exceeds the subtotal', async () => {
+    const err = new Error('الخصم أكبر من إجمالي الفاتورة');
+    err.statusCode = 400;
+    err.isOperational = true;
+    saleService.createSale.mockRejectedValue(err);
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/sales')
+      .set(authHeader())
+      .send({ items: [{ productId: validId(), quantity: 1 }], paymentMethod: 'cash', discount: 999999 });
+    expect(res.status).toBe(400);
+  });
+
   it('propagates a 409 stock-race error from the service', async () => {
     const err = new Error('الكمية المطلوبة لم تعد متاحة');
     err.statusCode = 409;

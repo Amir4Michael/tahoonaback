@@ -113,6 +113,56 @@ describe('POST /api/purchases', () => {
     expect(res.body.data.purchaseNumber).toBe('PUR-1001');
   });
 
+  it('rejects a negative discount at the validation layer, before calling the service', async () => {
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/purchases')
+      .set(authHeader())
+      .send({
+        supplierId: validId(),
+        items: [{ productId: validId(), quantity: 1, price: 10 }],
+        paymentMethod: 'cash',
+        discount: -5,
+      });
+    expect(res.status).toBe(400);
+    expect(purchaseService.createPurchase).not.toHaveBeenCalled();
+  });
+
+  it('passes a valid discount through to the service', async () => {
+    purchaseService.createPurchase.mockResolvedValue({ purchaseNumber: 'PUR-2', total: 25, discount: 5 });
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/purchases')
+      .set(authHeader())
+      .send({
+        supplierId: validId(),
+        items: [{ productId: validId(), quantity: 2, price: 15 }],
+        paymentMethod: 'cash',
+        discount: 5,
+      });
+    expect(res.status).toBe(201);
+    const [callArg] = purchaseService.createPurchase.mock.calls[0];
+    expect(callArg.discount).toBe(5);
+  });
+
+  it('propagates a 400 from the service when the discount exceeds the subtotal', async () => {
+    const err = new Error('الخصم أكبر من إجمالي العملية');
+    err.statusCode = 400;
+    err.isOperational = true;
+    purchaseService.createPurchase.mockRejectedValue(err);
+    const app = createApp();
+    const res = await request(app)
+      .post('/api/purchases')
+      .set(authHeader())
+      .send({
+        supplierId: validId(),
+        items: [{ productId: validId(), quantity: 1, price: 10 }],
+        paymentMethod: 'cash',
+        discount: 999999,
+      });
+    expect(res.status).toBe(400);
+  });
+
   it('propagates a service error (e.g. product not found) with its status code', async () => {
     const err = new Error('منتج غير موجود');
     err.statusCode = 404;

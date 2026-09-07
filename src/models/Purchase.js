@@ -35,6 +35,26 @@ const purchaseSchema = new Schema(
         message: 'عملية الشراء يجب أن تحتوي على منتج واحد على الأقل',
       },
     },
+    // Sum of the lines (price*quantity) BEFORE the invoice-level discount —
+    // kept alongside `total` so a saved purchase can always show both
+    // figures without recomputing from `items`. Defaults to `total` (a
+    // *function* default, evaluated against `this` document, so it also
+    // runs under `validateSync()`) when omitted: correct for every purchase
+    // built before this field existed (no discount => subtotal === total).
+    subtotal: moneyField({
+      required: true,
+      default() {
+        return this.total;
+      },
+    }),
+    // Flat (fixed-amount) discount applied to the purchase as a whole —
+    // never distributed across individual lines, so `items[].price` (which
+    // FEEDS the weighted-average cost recalculation on the product) always
+    // stays the actual per-unit price paid in this batch.
+    discount: moneyField({ required: true, default: 0 }),
+    // Final amount owed to the supplier for this purchase: subtotal -
+    // discount. `paid`/`remaining` and every existing consumer of `total`
+    // (supplier balances, reports, cashbox) are relative to THIS field.
     total: moneyField({ required: true }),
     paid: moneyField({ required: true }),
     remaining: moneyField({ required: true }),

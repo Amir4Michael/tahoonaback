@@ -115,29 +115,34 @@ describe('getPurchasesReport', () => {
 });
 
 describe('getProfitReport', () => {
+  // Revenue is summed from each sale's own `total` (post-discount), not
+  // items.price*quantity, so a flat invoice-level discount (see the Sale
+  // model / POS discount feature) doesn't overstate revenue. `discount` is
+  // surfaced in the report for transparency.
   it('computes gross and net profit from combined sales/expenses aggregations', async () => {
-    saleMocks.aggregate.mockReturnValue(mockAggregate([{ revenue: 10000, cogs: 6000 }]));
+    saleMocks.aggregate.mockReturnValue(mockAggregate([{ revenue: 10000, discount: 300, cogs: 6000 }]));
     expenseMocks.aggregate.mockReturnValue(mockAggregate([{ sum: 1500 }]));
     const report = await getProfitReport({});
-    expect(report).toEqual({ revenue: 10000, cogs: 6000, gross: 4000, expenses: 1500, net: 2500 });
+    expect(report).toEqual({ revenue: 10000, discount: 300, cogs: 6000, gross: 4000, expenses: 1500, net: 2500 });
   });
 
   it('defaults to zeros when there is no data at all', async () => {
     saleMocks.aggregate.mockReturnValue(mockAggregate([]));
     expenseMocks.aggregate.mockReturnValue(mockAggregate([]));
     const report = await getProfitReport({});
-    expect(report).toEqual({ revenue: 0, cogs: 0, gross: 0, expenses: 0, net: 0 });
+    expect(report).toEqual({ revenue: 0, discount: 0, cogs: 0, gross: 0, expenses: 0, net: 0 });
   });
 
-  it('computes revenue/cogs from sale line items via a single $unwind pass', async () => {
-    saleMocks.aggregate.mockReturnValue(mockAggregate([{ revenue: 0, cogs: 0 }]));
+  it('computes revenue from `total` (via $facet) and cogs from sale line items via $unwind', async () => {
+    saleMocks.aggregate.mockReturnValue(mockAggregate([{ revenue: 0, discount: 0, cogs: 0 }]));
     expenseMocks.aggregate.mockReturnValue(mockAggregate([]));
     await getProfitReport({});
     const pipeline = saleMocks.aggregate.mock.calls[0][0];
-    expect(pipeline.find((s) => s.$unwind)).toEqual({ $unwind: '$items' });
-    const groupStage = pipeline.find((s) => s.$group).$group;
-    expect(groupStage.revenue).toEqual({ $sum: { $multiply: ['$items.price', '$items.quantity'] } });
-    expect(groupStage.cogs).toEqual({ $sum: { $multiply: ['$items.cost', '$items.quantity'] } });
+    const facetStage = pipeline.find((s) => s.$facet).$facet;
+    expect(facetStage.revenue).toEqual([{ $group: { _id: null, revenue: { $sum: '$total' }, discount: { $sum: '$discount' } } }]);
+    expect(facetStage.cogs.find((s) => s.$unwind)).toEqual({ $unwind: '$items' });
+    const cogsGroup = facetStage.cogs.find((s) => s.$group).$group;
+    expect(cogsGroup.cogs).toEqual({ $sum: { $multiply: ['$items.cost', '$items.quantity'] } });
   });
 });
 

@@ -44,6 +44,29 @@ const saleSchema = new Schema(
         message: 'الفاتورة يجب أن تحتوي على منتج واحد على الأقل',
       },
     },
+    // Sum of the lines (price*quantity) BEFORE the invoice-level discount —
+    // kept alongside `total` so a saved invoice can always show both figures
+    // without recomputing from `items` (product prices/costs may drift later).
+    // Defaults to `total` (a *function* default, evaluated against `this`
+    // document at construction time — unlike a pre('validate') hook, this
+    // also runs under `validateSync()`) when omitted: correct for every sale
+    // built before this field existed, since no discount => subtotal ===
+    // total. sale.service.js always sets it explicitly for real sales.
+    subtotal: moneyField({
+      required: true,
+      default() {
+        return this.total;
+      },
+    }),
+    // Flat (fixed-amount) discount applied to the invoice as a whole — never
+    // distributed across individual lines, so `items[].price` always stays
+    // the actual per-unit price the product sold at. Validated in the
+    // service layer against `subtotal` (0 <= discount <= subtotal).
+    discount: moneyField({ required: true, default: 0 }),
+    // Final amount owed for this invoice: subtotal - discount. `paid` and
+    // `remaining` are always relative to THIS field, not `subtotal` — this
+    // preserves every existing consumer of `total` (customer balances,
+    // reports, cashbox) without needing to know about discounts at all.
     total: moneyField({ required: true }),
     paid: moneyField({ required: true }),
     remaining: moneyField({ required: true }),

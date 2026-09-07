@@ -28,6 +28,11 @@ const createPurchaseSchema = z.object({
   paid: z.coerce.number().optional(),
   date: z.string().trim().optional(), // 'YYYY-MM-DD', backdating — service defaults to now if omitted
   notes: z.string().trim().max(1000).optional().default(''),
+  // Flat (fixed-amount) purchase-level discount. Shape/sign check only —
+  // the real rule (discount <= subtotal) needs the priced lines, which only
+  // exist after the service reads each product, so it's enforced there
+  // (see purchase.service.js).
+  discount: z.coerce.number().min(0, 'قيمة الخصم غير صحيحة').optional(),
 });
 
 const listPurchasesQuerySchema = z.object({

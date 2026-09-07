@@ -140,22 +140,35 @@ export async function getPurchasesReport({ from, to } = {}) {
 }
 
 /**
- * Profit tab: revenue and cost-of-goods-sold computed together from sale
- * line items in a single $unwind pass (revenue this way equals summing
- * `total` per sale, since a sale's `total` is always the sum of its own
- * lines by construction — computing both from items in one aggregation
- * avoids a second query for what would otherwise be the same range scan).
+ * Profit tab: revenue and cost-of-goods-sold for the range.
+ *
+ * `revenue` is summed from each sale's own `total` (post-discount — the
+ * actual amount invoiced), NOT from `items.price * items.quantity`: a flat
+ * invoice-level discount (see the Sale model) is never distributed across
+ * lines, so summing the lines directly would overstate revenue by the total
+ * discount given in the range. `cogs` has no such concept and is still
+ * summed from the lines. Both are computed in one aggregation via `$facet`
+ * (one branch unwinds for cogs, the other doesn't) to keep this a single
+ * range scan over Sale.
  */
 export async function getProfitReport({ from, to } = {}) {
   const [[salesAgg], [expenseAgg]] = await Promise.all([
     Sale.aggregate([
       { $match: dateRangeMatch(from, to) },
-      { $unwind: '$items' },
       {
-        $group: {
-          _id: null,
-          revenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
-          cogs: { $sum: { $multiply: ['$items.cost', '$items.quantity'] } },
+        $facet: {
+          revenue: [{ $group: { _id: null, revenue: { $sum: '$total' }, discount: { $sum: '$discount' } } }],
+          cogs: [
+            { $unwind: '$items' },
+            { $group: { _id: null, cogs: { $sum: { $multiply: ['$items.cost', '$items.quantity'] } } } },
+          ],
+        },
+      },
+      {
+        $project: {
+          revenue: { $ifNull: [{ $arrayElemAt: ['$revenue.revenue', 0] }, 0] },
+          discount: { $ifNull: [{ $arrayElemAt: ['$revenue.discount', 0] }, 0] },
+          cogs: { $ifNull: [{ $arrayElemAt: ['$cogs.cogs', 0] }, 0] },
         },
       },
     ]),
@@ -166,11 +179,12 @@ export async function getProfitReport({ from, to } = {}) {
   ]);
 
   const revenue = salesAgg?.revenue || 0;
+  const discount = salesAgg?.discount || 0;
   const cogs = salesAgg?.cogs || 0;
   const gross = revenue - cogs;
   const expenses = expenseAgg?.sum || 0;
 
-  return { revenue, cogs, gross, expenses, net: gross - expenses };
+  return { revenue, discount, cogs, gross, expenses, net: gross - expenses };
 }
 
 /** Inventory tab: a snapshot of the CURRENT catalog — never date-filtered. */

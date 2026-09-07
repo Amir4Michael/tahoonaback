@@ -20,8 +20,26 @@ function escapeRegex(str) {
  *
  * `getTotals` mirrors the frontend's `customerTotals`/`supplierTotals`
  * selectors exactly: `{ total, paid, remaining, count, lastPurchase }`.
+ *
+ * `PaymentModel` is OPTIONAL and currently only passed for Customer (see
+ * customer.service.js) — standalone settlements (CustomerPayment) that
+ * reduce a customer's running balance without being tied to any single
+ * Sale. When provided, every payment for a person is folded into `paid`/
+ * `remaining` here, in ONE place, so `list`, `getOne`, and `getTotals` can
+ * never drift out of sync with each other (a duplicated aggregation in each
+ * call site risks exactly that). Supplier never passes this, so its
+ * behavior — pipeline shape, values, everything — is byte-for-byte
+ * unchanged from before this parameter existed.
+ *
+ * `ReturnModel` is the same idea for standalone SalesReturn documents —
+ * folded into `remaining` ONLY (never `paid`, which stays actual cash
+ * received), and `total` is left showing the raw gross sales sum on
+ * purpose: a return reduces what the customer effectively owes without
+ * rewriting the historical "total sold" figure. See
+ * services/customerBalance.service.js for the exact same formula used
+ * inside a transaction when validating a new payment/return.
  */
-export function createPersonService({ Model, TransactionModel, refField, activityType, entityType, labels }) {
+export function createPersonService({ Model, TransactionModel, refField, activityType, entityType, labels, PaymentModel, ReturnModel }) {
   async function getTotals(personId) {
     const [result] = await TransactionModel.aggregate([
       { $match: { [refField]: new mongoose.Types.ObjectId(personId) } },
@@ -35,14 +53,31 @@ export function createPersonService({ Model, TransactionModel, refField, activit
         },
       },
     ]);
-    if (!result) return { total: 0, paid: 0, remaining: 0, count: 0, lastPurchase: null };
-    return {
-      total: result.total,
-      paid: result.paid,
-      remaining: result.total - result.paid,
-      count: result.count,
-      lastPurchase: result.lastPurchase,
-    };
+    const base = !result
+      ? { total: 0, paid: 0, remaining: 0, count: 0, lastPurchase: null }
+      : { total: result.total, paid: result.paid, remaining: result.total - result.paid, count: result.count, lastPurchase: result.lastPurchase };
+
+    if (PaymentModel) {
+      const [paymentResult] = await PaymentModel.aggregate([
+        { $match: { [refField]: new mongoose.Types.ObjectId(personId) } },
+        { $group: { _id: null, paid: { $sum: '$amount' } } },
+      ]);
+      const paymentsPaid = paymentResult?.paid || 0;
+      base.paid += paymentsPaid;
+      base.remaining -= paymentsPaid;
+    }
+
+    if (ReturnModel) {
+      const [returnResult] = await ReturnModel.aggregate([
+        { $match: { [refField]: new mongoose.Types.ObjectId(personId) } },
+        { $group: { _id: null, returned: { $sum: '$totalReturnAmount' } } },
+      ]);
+      const returned = returnResult?.returned || 0;
+      base.returned = returned;
+      base.remaining -= returned;
+    }
+
+    return base;
   }
 
   /**
@@ -61,38 +96,79 @@ export function createPersonService({ Model, TransactionModel, refField, activit
     const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.trunc(Number(limit)) || DEFAULT_PAGE_SIZE));
     const skip = (pageNum - 1) * pageSize;
 
+    // The payment/return lookup+adjustment stages are only added when
+    // PaymentModel/ReturnModel are provided (Customer) — Supplier's
+    // pipeline is built exactly as before, stage for stage.
+    const itemsPipeline = [
+      { $skip: skip },
+      { $limit: pageSize },
+      {
+        $lookup: {
+          from: TransactionModel.collection.name,
+          localField: '_id',
+          foreignField: refField,
+          as: '_tx',
+        },
+      },
+      {
+        $addFields: {
+          totals: {
+            total: { $sum: '$_tx.total' },
+            paid: { $sum: '$_tx.paid' },
+            count: { $size: '$_tx' },
+            lastPurchase: { $max: '$_tx.date' },
+          },
+        },
+      },
+    ];
+
+    if (PaymentModel) {
+      itemsPipeline.push(
+        {
+          $lookup: {
+            from: PaymentModel.collection.name,
+            localField: '_id',
+            foreignField: refField,
+            as: '_payments',
+          },
+        },
+        { $addFields: { 'totals.paid': { $add: ['$totals.paid', { $sum: '$_payments.amount' }] } } },
+      );
+    }
+
+    if (ReturnModel) {
+      itemsPipeline.push(
+        {
+          $lookup: {
+            from: ReturnModel.collection.name,
+            localField: '_id',
+            foreignField: refField,
+            as: '_returns',
+          },
+        },
+        { $addFields: { 'totals.returned': { $sum: '$_returns.totalReturnAmount' } } },
+      );
+    }
+
+    const excludeProjection = { _tx: 0 };
+    if (PaymentModel) excludeProjection._payments = 0;
+    if (ReturnModel) excludeProjection._returns = 0;
+
+    itemsPipeline.push(
+      {
+        $addFields: {
+          'totals.remaining': ReturnModel
+            ? { $subtract: [{ $subtract: ['$totals.total', '$totals.paid'] }, '$totals.returned'] }
+            : { $subtract: ['$totals.total', '$totals.paid'] },
+        },
+      },
+      { $project: excludeProjection },
+    );
+
     const [{ items, totalCount }] = await Model.aggregate([
       { $match: match },
       { $sort: { createdAt: -1 } },
-      {
-        $facet: {
-          items: [
-            { $skip: skip },
-            { $limit: pageSize },
-            {
-              $lookup: {
-                from: TransactionModel.collection.name,
-                localField: '_id',
-                foreignField: refField,
-                as: '_tx',
-              },
-            },
-            {
-              $addFields: {
-                totals: {
-                  total: { $sum: '$_tx.total' },
-                  paid: { $sum: '$_tx.paid' },
-                  count: { $size: '$_tx' },
-                  lastPurchase: { $max: '$_tx.date' },
-                },
-              },
-            },
-            { $addFields: { 'totals.remaining': { $subtract: ['$totals.total', '$totals.paid'] } } },
-            { $project: { _tx: 0 } },
-          ],
-          totalCount: [{ $count: 'count' }],
-        },
-      },
+      { $facet: { items: itemsPipeline, totalCount: [{ $count: 'count' }] } },
     ]);
 
     const total = totalCount[0]?.count || 0;
@@ -149,10 +225,18 @@ export function createPersonService({ Model, TransactionModel, refField, activit
   /**
    * Checks for existing transactions BEFORE checking the person exists —
    * matching the frontend's exact check order in delete{Customer,Supplier}Svc.
+   * When PaymentModel is provided, a person with standalone payments on file
+   * (even with no Sale, an edge case in practice) is blocked the same way —
+   * deleting them would otherwise orphan those payment records.
    */
   async function remove(id) {
     const hasTransactions = await TransactionModel.exists({ [refField]: id });
     if (hasTransactions) throw new AppError(labels.deleteBlocked, 409, { code: 'HAS_TRANSACTIONS' });
+
+    if (PaymentModel) {
+      const hasPayments = await PaymentModel.exists({ [refField]: id });
+      if (hasPayments) throw new AppError(labels.deleteBlocked, 409, { code: 'HAS_TRANSACTIONS' });
+    }
 
     const person = await Model.findById(id);
     if (!person) throw new AppError(labels.notFound, 404);
