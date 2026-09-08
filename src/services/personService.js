@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { AppError } from '../middleware/errorHandler.js';
 import { recordActivity } from './activityLog.service.js';
 import { recordAuditLog } from './auditLog.service.js';
+import { round2 } from '../models/shared/money.js';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -35,9 +36,21 @@ function escapeRegex(str) {
  * folded into `remaining` ONLY (never `paid`, which stays actual cash
  * received), and `total` is left showing the raw gross sales sum on
  * purpose: a return reduces what the customer effectively owes without
- * rewriting the historical "total sold" figure. See
- * services/customerBalance.service.js for the exact same formula used
- * inside a transaction when validating a new payment/return.
+ * rewriting the historical "total sold" figure.
+ *
+ * A return is NEVER rejected for exceeding what the person owed (return
+ * eligibility is quantity-based only — see salesReturn.service.js /
+ * purchaseReturn.service.js), so this subtraction can legitimately go
+ * negative (e.g. a fully-paid customer returns goods). `remaining` is
+ * floored at 0 (matches every money field's own `min: 0` in this project —
+ * nothing here has ever displayed a negative amount owed), and the excess
+ * is surfaced separately as `creditOwed`: money the shop owes BACK to this
+ * person. This is a transparent, read-only figure only — not a stored,
+ * spendable, or redeemable balance (the system has no such concept, and
+ * this does not invent one); it does not touch the cashbox by itself. See
+ * services/customerBalance.service.js / supplierBalance.service.js for the
+ * exact same formula used inside a transaction when validating a new
+ * payment/return.
  */
 export function createPersonService({ Model, TransactionModel, refField, activityType, entityType, labels, PaymentModel, ReturnModel }) {
   async function getTotals(personId) {
@@ -75,6 +88,13 @@ export function createPersonService({ Model, TransactionModel, refField, activit
       const returned = returnResult?.returned || 0;
       base.returned = returned;
       base.remaining -= returned;
+      // Floor at 0 + surface any excess as creditOwed — see the doc block
+      // above. Only relevant once ReturnModel exists, since neither Sale/
+      // Purchase (bounded per-transaction) nor CustomerPayment/SupplierPayment
+      // (already rejected past the balance) can push remaining negative on
+      // their own.
+      base.creditOwed = base.remaining < 0 ? round2(-base.remaining) : 0;
+      base.remaining = base.remaining < 0 ? 0 : round2(base.remaining);
     }
 
     return base;
@@ -162,8 +182,22 @@ export function createPersonService({ Model, TransactionModel, refField, activit
             : { $subtract: ['$totals.total', '$totals.paid'] },
         },
       },
-      { $project: excludeProjection },
     );
+
+    if (ReturnModel) {
+      // Same floor-at-0 + creditOwed split as getTotals — a return can
+      // legitimately push the raw remaining negative (return eligibility is
+      // quantity-based only, never blocked by balance), and that excess is
+      // surfaced rather than hidden or clamped away silently.
+      itemsPipeline.push({
+        $addFields: {
+          'totals.creditOwed': { $cond: [{ $lt: ['$totals.remaining', 0] }, { $multiply: ['$totals.remaining', -1] }, 0] },
+          'totals.remaining': { $cond: [{ $lt: ['$totals.remaining', 0] }, 0, '$totals.remaining'] },
+        },
+      });
+    }
+
+    itemsPipeline.push({ $project: excludeProjection });
 
     const [{ items, totalCount }] = await Model.aggregate([
       { $match: match },

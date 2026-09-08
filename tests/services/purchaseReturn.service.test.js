@@ -196,17 +196,13 @@ describe('createPurchaseReturn — the 10 bought / 3 returned scenario from the 
   });
 });
 
-describe('createPurchaseReturn — rejecting refund/credit-balance scenarios (no such concept in this system)', () => {
-  it('rejects a return whose value exceeds what we currently owe the supplier', async () => {
+describe('createPurchaseReturn — return acceptance is NEVER blocked by supplier balance (bug fix)', () => {
+  it('accepts a return even when we already paid the supplier in full (remaining = 0) — no rejection', async () => {
     purchaseMocks.findById.mockReturnValue(findByIdQuery(PURCHASE_DOC));
-    // We already paid the supplier in full (remaining = 0) -> any return needs a refund/credit, unsupported.
     purchaseMocks.aggregate.mockReturnValue(aggregateResult([{ total: 1000, paid: 1000 }]));
 
-    await expect(
-      createPurchaseReturn({ purchaseId: VALID_PURCHASE_ID, items: [{ productId: 'p1', quantity: 3 }], idempotencyKey: 'k-exceeds' }),
-    ).rejects.toMatchObject({ statusCode: 400, details: expect.objectContaining({ code: 'EXCEEDS_REMAINING' }) });
-    expect(productMocks.updateOne).not.toHaveBeenCalled();
-    expect(purchaseReturnMocks.create).not.toHaveBeenCalled();
+    const ret = await createPurchaseReturn({ purchaseId: VALID_PURCHASE_ID, items: [{ productId: 'p1', quantity: 3 }], idempotencyKey: 'k-exceeds' });
+    expect(ret.totalReturnAmount).toBe(300);
   });
 
   it('accepts a return exactly equal to what we currently owe the supplier (boundary)', async () => {

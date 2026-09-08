@@ -94,13 +94,13 @@ export async function getReturnableForPurchase(purchaseId) {
  *    live blended average (same simplification createSalesReturn already
  *    makes when returned units re-enter stock).
  *
- * ACCOUNTING POLICY: identical structure to createSalesReturn, mirrored
- * for what WE owe the supplier instead of what a customer owes us — the
- * system has no refund/credit-balance concept in either direction, so a
- * return whose value would exceed what we currently owe this supplier
- * (e.g. we already paid in full) is REJECTED outright rather than driving
- * the balance negative (which would mean the supplier owing US money back
- * — unsupported, same as the customer-side case).
+ * ACCOUNTING POLICY (corrected): identical to createSalesReturn, mirrored
+ * for what WE owe the supplier instead of what a customer owes us —
+ * eligibility is quantity/stock-based only, NEVER conditioned on what we
+ * currently owe the supplier. Any excess (the return is worth more than
+ * what we owed) surfaces as `creditOwed` in personService.getTotals —
+ * money the supplier owes back to us — not silently absorbed or used to
+ * block the return.
  *
  * `idempotencyKey` (required) makes this endpoint safe against duplicate
  * submission — identical mechanism to createSalesReturn.
@@ -166,14 +166,14 @@ export async function createPurchaseReturn({ purchaseId, items, idempotencyKey }
 
     const totalReturnAmount = round2(lines.reduce((s, l) => s + l.returnAmount, 0));
 
+    // Eligibility for a return is quantity/stock-based ONLY (checked above
+    // and via the guarded stock decrement below) — a return is NEVER
+    // rejected based on what we currently owe the supplier. `currentRemaining`
+    // is still read here purely to log an accurate balanceBefore/balanceAfter
+    // on the audit trail below; any excess beyond what we owed surfaces as
+    // `creditOwed` in personService.getTotals (see salesReturn.service.js
+    // for the full reasoning, mirrored here for the supplier side).
     const currentRemaining = await getSupplierRemaining(purchase.supplierId, session);
-    if (totalReturnAmount > currentRemaining) {
-      throw new AppError(
-        'قيمة المرتجع أكبر من المتبقي المستحق لهذا المورد — هذا يستلزم استرداد نقدي أو رصيد دائن من المورد، وهو غير مدعوم في النظام حاليًا',
-        400,
-        { code: 'EXCEEDS_REMAINING', remaining: currentRemaining, returnAmount: totalReturnAmount },
-      );
-    }
 
     // Send stock back OUT to the supplier — atomic, guarded decrement per
     // line (mirrors createSale's own stock decrement exactly): re-checks

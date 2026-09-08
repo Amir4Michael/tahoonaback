@@ -49,7 +49,7 @@ describe('supplierService wiring', () => {
     purchaseReturnMocks.aggregate.mockReturnValue(mockAggregate([]));
     const totals = await supplierService.getTotals('507f1f77bcf86cd799439011');
     // Purchase-time paid (3000) + later settlement (1000) = 4000; remaining 5000-4000=1000.
-    expect(totals).toEqual({ total: 5000, paid: 4000, remaining: 1000, count: 1, lastPurchase: null, returned: 0 });
+    expect(totals).toEqual({ total: 5000, paid: 4000, remaining: 1000, count: 1, lastPurchase: null, returned: 0, creditOwed: 0 });
   });
 
   it('folds standalone PurchaseReturn amounts into remaining (never paid), on top of Purchase totals', async () => {
@@ -58,6 +58,6 @@ describe('supplierService wiring', () => {
     purchaseReturnMocks.aggregate.mockReturnValue(mockAggregate([{ returned: 300 }]));
     const totals = await supplierService.getTotals('507f1f77bcf86cd799439011');
     // total/paid untouched by the return; remaining = 1000 - 400 - 300 = 300.
-    expect(totals).toEqual({ total: 1000, paid: 400, remaining: 300, count: 1, lastPurchase: null, returned: 300 });
+    expect(totals).toEqual({ total: 1000, paid: 400, remaining: 300, count: 1, lastPurchase: null, returned: 300, creditOwed: 0 });
   });
 });

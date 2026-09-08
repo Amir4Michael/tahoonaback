@@ -49,7 +49,7 @@ describe('customerService wiring', () => {
     salesReturnMocks.aggregate.mockReturnValue(mockAggregate([]));
     const totals = await customerService.getTotals('507f1f77bcf86cd799439011');
     // Sale-time paid (600) + later settlement (250) = 850; remaining 1000-850=150.
-    expect(totals).toEqual({ total: 1000, paid: 850, remaining: 150, count: 1, lastPurchase: null, returned: 0 });
+    expect(totals).toEqual({ total: 1000, paid: 850, remaining: 150, count: 1, lastPurchase: null, returned: 0, creditOwed: 0 });
   });
 
   it('folds standalone SalesReturn amounts into remaining (never paid), on top of Sale totals', async () => {
@@ -58,6 +58,6 @@ describe('customerService wiring', () => {
     salesReturnMocks.aggregate.mockReturnValue(mockAggregate([{ returned: 200 }]));
     const totals = await customerService.getTotals('507f1f77bcf86cd799439011');
     // total/paid untouched by the return; remaining = 900 - 500 - 200 = 200.
-    expect(totals).toEqual({ total: 900, paid: 500, remaining: 200, count: 1, lastPurchase: null, returned: 200 });
+    expect(totals).toEqual({ total: 900, paid: 500, remaining: 200, count: 1, lastPurchase: null, returned: 200, creditOwed: 0 });
   });
 });

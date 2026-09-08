@@ -218,3 +218,50 @@ describe('remove', () => {
     );
   });
 });
+
+describe('getTotals with ReturnModel — return never rejected, excess surfaces as creditOwed (bug fix)', () => {
+  function makeServiceWithReturns() {
+    const Transactions = makeModelMocks();
+    const Returns = makeModelMocks();
+    const svc = createPersonService({
+      Model: makeModelMocks(),
+      TransactionModel: Transactions,
+      refField: 'customerId',
+      activityType: 'customer',
+      entityType: 'Customer',
+      ReturnModel: Returns,
+      labels,
+    });
+    return { svc, Transactions, Returns };
+  }
+
+  it('example 1: paid in full (1000/1000, remaining 0), return worth 300 -> remaining stays 0, creditOwed = 300', async () => {
+    const { svc, Transactions, Returns } = makeServiceWithReturns();
+    Transactions.aggregate.mockReturnValue(mockAggregate([{ total: 1000, paid: 1000, count: 1, lastPurchase: null }]));
+    Returns.aggregate.mockReturnValue(mockAggregate([{ returned: 300 }]));
+
+    const totals = await svc.getTotals('507f1f77bcf86cd799439011');
+    expect(totals.remaining).toBe(0);
+    expect(totals.creditOwed).toBe(300);
+  });
+
+  it('example 2: 1000 total, paid 600 (remaining 400), return 300 -> remaining 100, creditOwed 0', async () => {
+    const { svc, Transactions, Returns } = makeServiceWithReturns();
+    Transactions.aggregate.mockReturnValue(mockAggregate([{ total: 1000, paid: 600, count: 1, lastPurchase: null }]));
+    Returns.aggregate.mockReturnValue(mockAggregate([{ returned: 300 }]));
+
+    const totals = await svc.getTotals('507f1f77bcf86cd799439011');
+    expect(totals.remaining).toBe(100);
+    expect(totals.creditOwed).toBe(0);
+  });
+
+  it('example 3: 1000 total, paid 600 (remaining 400), return 600 -> remaining 0, creditOwed 200 (the excess is surfaced, not hidden)', async () => {
+    const { svc, Transactions, Returns } = makeServiceWithReturns();
+    Transactions.aggregate.mockReturnValue(mockAggregate([{ total: 1000, paid: 600, count: 1, lastPurchase: null }]));
+    Returns.aggregate.mockReturnValue(mockAggregate([{ returned: 600 }]));
+
+    const totals = await svc.getTotals('507f1f77bcf86cd799439011');
+    expect(totals.remaining).toBe(0);
+    expect(totals.creditOwed).toBe(200);
+  });
+});

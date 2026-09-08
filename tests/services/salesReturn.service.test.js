@@ -209,17 +209,14 @@ describe('createSalesReturn — the 5 sold / 2 returned scenario from the spec',
   });
 });
 
-describe('createSalesReturn — rejecting refund/credit-balance scenarios (no such concept in this system)', () => {
-  it('rejects a return whose value exceeds the customer\'s current aggregate remaining balance', async () => {
+describe('createSalesReturn — return acceptance is NEVER blocked by customer balance (bug fix)', () => {
+  it('accepts a return even when the customer already paid in full (remaining = 0) — no rejection', async () => {
     saleMocks.findById.mockReturnValue(findByIdQuery(SALE_DOC));
-    // Customer already fully paid (remaining = 0) -> any return needs a refund/credit, which isn't supported.
+    // Customer already fully paid (remaining = 0) — must NOT be rejected.
     saleMocks.aggregate.mockReturnValue(aggregateResult([{ total: 900, paid: 900 }]));
 
-    await expect(
-      createSalesReturn({ saleId: VALID_SALE_ID, items: [{ productId: 'p1', quantity: 2 }], idempotencyKey: 'k-exceeds' }),
-    ).rejects.toMatchObject({ statusCode: 400, details: expect.objectContaining({ code: 'EXCEEDS_REMAINING' }) });
-    expect(productMocks.updateOne).not.toHaveBeenCalled();
-    expect(salesReturnMocks.create).not.toHaveBeenCalled();
+    const ret = await createSalesReturn({ saleId: VALID_SALE_ID, items: [{ productId: 'p1', quantity: 2 }], idempotencyKey: 'k-exceeds' });
+    expect(ret.totalReturnAmount).toBe(200);
   });
 
   it('accepts a return when the customer has enough OTHER debt to absorb it, even if this specific sale was cash/fully paid', async () => {
@@ -235,17 +232,15 @@ describe('createSalesReturn — rejecting refund/credit-balance scenarios (no su
     expect(ret.totalReturnAmount).toBe(200);
   });
 
-  it('also accounts for a prior standalone CustomerPayment settlement when validating a new return (cross-feature consistency)', async () => {
+  it('accepts a return even when its value exceeds what the customer currently owes overall (creditOwed handles the excess, not a rejection)', async () => {
     saleMocks.findById.mockReturnValue(findByIdQuery(SALE_DOC));
     saleMocks.aggregate.mockReturnValue(aggregateResult([{ total: 900, paid: 0 }])); // sales-side remaining = 900
     paymentMocks.aggregate.mockReturnValue(aggregateResult([{ paid: 750 }])); // customer already settled 750 -> remaining = 150
 
-    // Returning product A (2 * 100 = 200) would exceed the true 150 remaining
-    // once the earlier payment is taken into account, even though it looks
-    // fine against the raw 900/0 sale figures alone.
-    await expect(
-      createSalesReturn({ saleId: VALID_SALE_ID, items: [{ productId: 'p1', quantity: 2 }], idempotencyKey: 'k-cross-feature' }),
-    ).rejects.toMatchObject({ statusCode: 400, details: expect.objectContaining({ code: 'EXCEEDS_REMAINING', remaining: 150 }) });
+    // Returning product A (2 * 100 = 200) exceeds the true 150 remaining —
+    // must still be accepted.
+    const ret = await createSalesReturn({ saleId: VALID_SALE_ID, items: [{ productId: 'p1', quantity: 2 }], idempotencyKey: 'k-cross-feature' });
+    expect(ret.totalReturnAmount).toBe(200);
   });
 
   it('accepts a return exactly equal to the current remaining balance (boundary)', async () => {

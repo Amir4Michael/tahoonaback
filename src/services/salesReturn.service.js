@@ -74,23 +74,23 @@ export async function getReturnableForSale(saleId) {
  * READ here, never updated or deleted (see Sale.js / SalesReturn.js for
  * why: historical-integrity is a hard rule throughout this project).
  *
- * ACCOUNTING POLICY (read before touching this function): the system has no
- * refund or credit-balance concept anywhere — Customer has no such field,
- * and nothing else reads or displays one. A return reduces the CUSTOMER'S
- * aggregate outstanding balance (across all their sales, minus payments,
- * minus earlier returns — see getCustomerRemaining), the same aggregate
- * figure a "تسجيل سداد" payment is validated against. This correctly
- * handles the case in the spec (customer owed 400, returns goods worth 200
- * -> now owes 200) WITHOUT inventing anything: it's the same aggregate-debt
- * model already used for CustomerPayment, just subtracting from `total`
- * instead of adding to `paid`.
- *
- * If a return's value would exceed what the customer currently owes overall
- * (e.g. they already fully paid for the returned goods and have no other
- * debt to offset it against), that is EXACTLY the refund/credit-balance
- * case this system doesn't support — it is REJECTED outright rather than
- * allowed to drive the balance negative. See the phase's design note for
- * what a Refund or Credit Balance feature would need to look like.
+ * ACCOUNTING POLICY (corrected — read before touching this function):
+ * eligibility for a return is QUANTITY-based only (availableToReturn), and
+ * is NEVER conditioned on the customer's outstanding balance — a customer
+ * who paid in full, owes nothing, owes something, or already overpaid can
+ * always return goods they bought. What differs is only the effect on
+ * their balance: a return always subtracts from the customer's aggregate
+ * total (across all their sales, minus payments, minus earlier returns —
+ * see getCustomerRemaining / personService.getTotals), the same aggregate
+ * figure a "تسجيل سداد" payment is validated against. When that subtraction
+ * would take the balance below 0 (the return is worth more than what they
+ * owed), the excess is surfaced transparently as `creditOwed` in
+ * personService.getTotals — money the shop owes back to the customer — NOT
+ * silently absorbed, NOT hidden, and NOT used to block the return. This is
+ * a read-only, cash-uninvolved figure: it does not touch the cashbox and
+ * is not a spendable/redeemable stored balance (the system has no such
+ * concept) — see the migration/report note for what a real refund or
+ * credit-redemption feature would need on top of this.
  *
  * Wrapped in a transaction for the same reason as createSale/createPurchase
  * /createCustomerPayment: the return record, the stock restoration, and the
@@ -163,14 +163,17 @@ export async function createSalesReturn({ saleId, items, idempotencyKey }) {
 
     const totalReturnAmount = round2(lines.reduce((s, l) => s + l.returnAmount, 0));
 
+    // Eligibility for a return is quantity-based ONLY (checked above via
+    // availableToReturn) — a return is NEVER rejected based on the
+    // customer's outstanding balance. Whether the customer currently owes
+    // money, owes nothing, or already overpaid, the goods can always be
+    // returned; what differs is only how the return then affects their
+    // balance (see personService.getTotals: the excess, if the return is
+    // worth more than what they owed, surfaces as `creditOwed` — money the
+    // shop owes back — rather than being silently absorbed or blocking the
+    // return). `currentRemaining` is still read here purely to log an
+    // accurate balanceBefore/balanceAfter on the audit trail below.
     const currentRemaining = await getCustomerRemaining(sale.customerId, session);
-    if (totalReturnAmount > currentRemaining) {
-      throw new AppError(
-        'قيمة المرتجع أكبر من المتبقي المستحق على العميل — هذا يستلزم استرداد نقدي أو رصيد دائن، وهو غير مدعوم في النظام حاليًا',
-        400,
-        { code: 'EXCEEDS_REMAINING', remaining: currentRemaining, returnAmount: totalReturnAmount },
-      );
-    }
 
     // Restore stock — a plain, atomic $inc per line. No weighted-average
     // cost recalculation: the returned units go back at their existing
