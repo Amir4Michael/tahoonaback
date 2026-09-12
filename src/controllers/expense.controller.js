@@ -12,6 +12,11 @@ export const summary = asyncHandler(async (req, res) => {
   res.json({ success: true, data: result });
 });
 
+export const reasons = asyncHandler(async (req, res) => {
+  const result = await expenseService.getDistinctReasons();
+  res.json({ success: true, data: result });
+});
+
 export const create = asyncHandler(async (req, res) => {
   const { reason, amount, date, notes } = req.body;
   const expense = await expenseService.createExpense({ reason, amount, date, notes });

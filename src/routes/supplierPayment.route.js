@@ -3,6 +3,7 @@ import { z } from 'zod';
 import mongoose from 'mongoose';
 import { requireAuth } from '../middleware/auth.js';
 import { validateBody, validateQuery } from '../middleware/validate.js';
+import { validateObjectIdParam } from '../middleware/validateObjectId.js';
 import * as controller from '../controllers/supplierPayment.controller.js';
 
 const router = Router();
@@ -30,5 +31,6 @@ const listPaymentsQuerySchema = z.object({
 
 router.get('/', validateQuery(listPaymentsQuerySchema), controller.list);
 router.post('/', validateBody(createPaymentSchema), controller.create);
+router.delete('/:id', validateObjectIdParam(), controller.remove);
 
 export default router;

@@ -220,7 +220,50 @@ export function createPersonService({ Model, TransactionModel, refField, activit
     return { ...plain, totals };
   }
 
-  async function create(data) {
+  /**
+   * Existing people who share this new one's phone (exact — a phone number
+   * genuinely identifies one person) OR name (case/whitespace-insensitive
+   * exact match — catches "أحمد علي" vs "احمد على" typo-level variance
+   * only, not a fuzzy/partial match that would flag unrelated people who
+   * simply share a first name). Used to warn before creating what might be
+   * an accidental second record for someone who already exists — nothing
+   * here is a hard uniqueness rule; two genuinely different people can
+   * share a name, and this never blocks — see `create`.
+   */
+  async function findDuplicates({ name, phone }) {
+    const or = [];
+    if (name && name.trim()) {
+      or.push({ name: new RegExp(`^${escapeRegex(name.trim())}$`, 'i') });
+    }
+    if (phone && phone.trim()) {
+      or.push({ phone: phone.trim() });
+    }
+    if (!or.length) return [];
+    return Model.find({ $or: or }).limit(5).select('name phone address').lean();
+  }
+
+  /**
+   * `allowDuplicate` (default false): when a possible duplicate exists (see
+   * findDuplicates) and this isn't set, the create is rejected with a 409
+   * carrying the matches, instead of silently creating a second record for
+   * someone who may already be in the system — a real, confirmed gap
+   * before this fix (nothing checked this at all). The frontend shows
+   * those matches and lets the person confirm they genuinely want a new,
+   * separate record, then resubmits with `allowDuplicate: true` to go
+   * through anyway — this never becomes a hard block.
+   */
+  async function create(data, { allowDuplicate = false } = {}) {
+    if (!allowDuplicate) {
+      const duplicates = await findDuplicates(data);
+      if (duplicates.length) {
+        throw new AppError(
+          'يوجد سجل بنفس الاسم أو رقم الهاتف بالفعل',
+          409,
+          { code: 'POSSIBLE_DUPLICATE', matches: duplicates },
+        );
+      }
+    }
+
     const person = await Model.create(data);
     await recordActivity({ type: activityType, description: `${labels.added}: ${person.name}`, refId: person._id });
     await recordAuditLog({

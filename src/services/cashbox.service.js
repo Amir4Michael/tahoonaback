@@ -3,6 +3,7 @@ import { AppError } from '../middleware/errorHandler.js';
 import { recordActivity } from './activityLog.service.js';
 import { recordAuditLog } from './auditLog.service.js';
 import { withTransaction } from '../utils/transactions.js';
+import { cairoTodayBounds, cairoRangeMatch } from '../utils/timezone.js';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -36,10 +37,7 @@ export async function getBalance(session) {
 
 /** Balance + today's in/out totals, for the cashbox page header stats. */
 export async function getSummary() {
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  const endOfToday = new Date();
-  endOfToday.setHours(23, 59, 59, 999);
+  const { start: startOfToday, end: endOfToday } = cairoTodayBounds();
 
   const [balance, todayAggResult] = await Promise.all([
     getBalance(),
@@ -66,11 +64,8 @@ export async function listCashboxTransactions({ page = 1, limit = DEFAULT_PAGE_S
   if (search && search.trim()) {
     match.reason = new RegExp(escapeRegex(search.trim()), 'i');
   }
-  if (from || to) {
-    match.date = {};
-    if (from) match.date.$gte = new Date(`${from}T00:00:00`);
-    if (to) match.date.$lte = new Date(`${to}T23:59:59`);
-  }
+  const range = cairoRangeMatch(from, to);
+  if (Object.keys(range).length) match.date = range;
 
   const pageNum = Math.max(1, Math.trunc(Number(page)) || 1);
   const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.trunc(Number(limit)) || DEFAULT_PAGE_SIZE));
@@ -137,5 +132,52 @@ export async function createCashTransaction({ type, amount, reason, date, notes 
     );
 
     return tx;
+  });
+}
+
+/**
+ * Deletes a MANUAL cashbox transaction only (refType === 'manual') — a
+ * deposit/withdrawal entered directly from the Cashbox page, with no other
+ * record depending on it. Every OTHER refType ('sale', 'purchase',
+ * 'expense', 'customer_payment', 'supplier_payment') is owned by that other
+ * record and must be deleted through IT instead (e.g. deleteExpense,
+ * deleteCustomerPayment) so the two stay deleted together — deleting one
+ * side here would silently leave the other claiming money moved that no
+ * longer shows up anywhere, which is exactly the inconsistency those
+ * dedicated delete functions exist to prevent. Rejected outright rather
+ * than silently allowed, so that mistake can't happen through this
+ * function.
+ */
+export async function deleteCashTransaction(id) {
+  const tx = await CashboxTransaction.findById(id);
+  if (!tx) throw new AppError('الحركة غير موجودة', 404);
+
+  if (tx.refType !== 'manual') {
+    throw new AppError(
+      'الحركة دي مرتبطة بعملية تانية (بيع/شراء/مصروف/سداد) ومينفعش تتحذف من هنا مباشرة — احذف العملية الأصلية بدل كده.',
+      400,
+    );
+  }
+
+  return withTransaction(async (session) => {
+    await CashboxTransaction.deleteOne({ _id: id }, { session });
+
+    await recordActivity(
+      {
+        type: 'cash',
+        description: tx.type === 'in'
+          ? `تم حذف حركة إضافة للصندوق: ${tx.reason}`
+          : `تم حذف حركة سحب من الصندوق: ${tx.reason}`,
+        amount: tx.amount,
+      },
+      { session },
+    );
+
+    await recordAuditLog(
+      { action: 'cashbox.transaction.delete', entityType: 'CashboxTransaction', entityId: tx._id, values: { type: tx.type, amount: tx.amount, reason: tx.reason } },
+      { session },
+    );
+
+    return { success: true };
   });
 }

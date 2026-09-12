@@ -12,6 +12,10 @@ const createSchema = z.object({
   name: z.string().trim().min(1, 'أدخل الاسم').max(200),
   phone: z.string().trim().max(30).default(''),
   address: z.string().trim().max(300).default(''),
+  // Set by the frontend on a resubmit AFTER the person already confirmed
+  // "yes, add it anyway" in response to a 409 POSSIBLE_DUPLICATE — see
+  // personService.js's create(). Never set on a normal first submission.
+  allowDuplicate: z.boolean().optional().default(false),
 });
 
 const updateSchema = z.object({
@@ -49,7 +53,8 @@ export function createPersonRouter(service) {
   }));
 
   router.post('/', validateBody(createSchema), asyncHandler(async (req, res) => {
-    const person = await service.create(req.body);
+    const { allowDuplicate, ...data } = req.body;
+    const person = await service.create(data, { allowDuplicate });
     res.status(201).json({ success: true, data: person });
   }));
 

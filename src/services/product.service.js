@@ -1,4 +1,6 @@
 import Product from '../models/Product.js';
+import Sale from '../models/Sale.js';
+import Purchase from '../models/Purchase.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { isDuplicateKeyError } from '../utils/mongoErrors.js';
 import { recordActivity } from './activityLog.service.js';
@@ -16,8 +18,14 @@ const DUPLICATE_CODE_ERROR = () => new AppError('كود المنتج مستخد�
 /**
  * Matches the current frontend's InventoryPage exactly:
  * - search: substring match (case-insensitive) on name OR code
- * - filter: 'low' (0 < qty <= minQuantity), 'out' (qty <= 0), 'available' (qty > minQuantity)
+ * - filter: 'low' (0 < qty <= minQuantity), 'out' (qty <= 0), 'available' (qty > minQuantity),
+ *           'hidden' (isActive === false — soft-deleted products, see deleteProduct)
  * - sort: 'name' (Arabic-locale order, default), 'qtyAsc', 'qtyDesc', 'profit' (salePrice - purchasePrice, desc)
+ *
+ * Every filter except 'hidden' implicitly excludes hidden products — they're
+ * meant to stay out of day-to-day use (Inventory, POS, Purchases pickers all
+ * go through this same function), only reachable via the explicit 'hidden'
+ * filter so they can be restored.
  *
  * Built as a single aggregation ($facet) so the page of items and the total
  * count for pagination come back in one round-trip to MongoDB instead of two
@@ -33,10 +41,17 @@ export async function listProducts({ page = 1, limit = DEFAULT_PAGE_SIZE, search
 
   if (filter === 'out') {
     match.quantity = { $lte: 0 };
+    match.isActive = { $ne: false };
   } else if (filter === 'low') {
     match.$expr = { $and: [{ $gt: ['$quantity', 0] }, { $lte: ['$quantity', '$minQuantity'] }] };
+    match.isActive = { $ne: false };
   } else if (filter === 'available') {
     match.$expr = { $gt: ['$quantity', '$minQuantity'] };
+    match.isActive = { $ne: false };
+  } else if (filter === 'hidden') {
+    match.isActive = false;
+  } else {
+    match.isActive = { $ne: false };
   }
 
   const pageNum = Math.max(1, Math.trunc(Number(page)) || 1);
@@ -150,17 +165,44 @@ export async function updateProduct(id, data) {
 }
 
 /**
- * No referential check against Sale/Purchase history here — matching the
- * current frontend's deleteProductSvc exactly. This is intentional, not an
- * oversight: every Sale/Purchase line already stores its own name/code/price
- * snapshot independent of the live Product document (see Sale/Purchase model
- * docs), so deleting a product never corrupts historical records or reports.
- * (Contrast with Customer/Supplier deletion, which the frontend DOES block
- * when they have transactions on file — that's preserved as-is too.)
+ * A product with NO Sale/Purchase history is deleted for real — nothing
+ * references it, so there's nothing to protect.
+ *
+ * A product WITH Sale/Purchase history is "hidden" instead (isActive:
+ * false), never hard-deleted — matching how Customer/Supplier deletion is
+ * already blocked when they have transactions on file. Every Sale/Purchase
+ * line already stores its own name/code/price snapshot independent of the
+ * live Product document, so this isn't needed to protect the sale/purchase
+ * records themselves — those are safe either way. It's needed so the
+ * document's _id keeps resolving: a later SalesReturn/PurchaseReturn on an
+ * old invoice referencing this product runs `Product.updateOne({_id}, {$inc:
+ * {quantity: ...}})`, and if that _id no longer existed, the update would
+ * silently match nothing — the return would still succeed and the
+ * customer's balance would still adjust, but the returned stock would
+ * vanish with no error or warning anywhere (a confirmed, reproduced bug
+ * this fix closes). Hiding keeps the document (and its _id) alive for that,
+ * while `isActive: false` keeps it out of Inventory/POS/Purchases (see
+ * listProducts) until someone explicitly restores it.
  */
 export async function deleteProduct(id) {
   const product = await Product.findById(id);
   if (!product) throw new AppError('المنتج غير موجود', 404);
+
+  const hasHistory = (await Sale.exists({ 'items.productId': id }))
+    || (await Purchase.exists({ 'items.productId': id }));
+
+  if (hasHistory) {
+    product.isActive = false;
+    await product.save();
+    await recordActivity({ type: 'product', description: `تم إخفاء المنتج (له فواتير سابقة): ${product.name}` });
+    await recordAuditLog({
+      action: 'product.hide',
+      entityType: 'Product',
+      entityId: product._id,
+      values: { name: product.name, code: product.code },
+    });
+    return { success: true, hidden: true };
+  }
 
   await Product.deleteOne({ _id: id });
   await recordActivity({ type: 'product', description: `تم حذف المنتج: ${product.name}` });
@@ -170,5 +212,26 @@ export async function deleteProduct(id) {
     entityId: product._id,
     values: { name: product.name, code: product.code },
   });
-  return { success: true };
+  return { success: true, hidden: false };
+}
+
+/**
+ * Brings a hidden product back into normal use (isActive: true). The only
+ * way to reach a hidden product again after deleteProduct hid it — e.g.
+ * after a return restocked it and the shop wants to sell it again.
+ */
+export async function restoreProduct(id) {
+  const product = await Product.findById(id);
+  if (!product) throw new AppError('المنتج غير موجود', 404);
+
+  product.isActive = true;
+  await product.save();
+  await recordActivity({ type: 'product', description: `تم استعادة المنتج: ${product.name}`, refId: product._id });
+  await recordAuditLog({
+    action: 'product.restore',
+    entityType: 'Product',
+    entityId: product._id,
+    values: { name: product.name, code: product.code },
+  });
+  return product;
 }

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
 import { validateBody, validateQuery } from '../middleware/validate.js';
+import { validateObjectIdParam } from '../middleware/validateObjectId.js';
 import * as controller from '../controllers/cashbox.controller.js';
 
 const router = Router();
@@ -30,5 +31,6 @@ const listQuerySchema = z.object({
 router.get('/', validateQuery(listQuerySchema), controller.list);
 router.get('/summary', controller.summary);
 router.post('/', validateBody(createSchema), controller.create);
+router.delete('/:id', validateObjectIdParam(), controller.remove);
 
 export default router;

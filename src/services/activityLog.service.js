@@ -1,4 +1,5 @@
 import ActivityLog from '../models/ActivityLog.js';
+import { cairoRangeMatch } from '../utils/timezone.js';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -26,11 +27,8 @@ export async function recordActivity({ type, description, amount = 0, refId = nu
 export async function listActivity({ page = 1, limit = DEFAULT_PAGE_SIZE, type, from, to } = {}) {
   const match = {};
   if (type && type !== 'all') match.type = type;
-  if (from || to) {
-    match.date = {};
-    if (from) match.date.$gte = new Date(`${from}T00:00:00`);
-    if (to) match.date.$lte = new Date(`${to}T23:59:59`);
-  }
+  const range = cairoRangeMatch(from, to);
+  if (Object.keys(range).length) match.date = range;
 
   const pageNum = Math.max(1, Math.trunc(Number(page)) || 1);
   const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.trunc(Number(limit)) || DEFAULT_PAGE_SIZE));

@@ -26,6 +26,7 @@ const listQuerySchema = z.object({
 
 router.get('/', validateQuery(listQuerySchema), controller.list);
 router.get('/summary', controller.summary);
+router.get('/reasons', controller.reasons);
 router.post('/', validateBody(createSchema), controller.create);
 router.delete('/:id', validateObjectIdParam(), controller.remove);
 

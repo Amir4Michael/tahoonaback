@@ -151,3 +151,48 @@ export async function listCustomerPayments({ customerId, page = 1, limit = DEFAU
     pagination: { page: pageNum, limit: pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
   };
 }
+
+/**
+ * Deletes a customer payment AND its linked cashbox transaction together —
+ * same pattern as expense.service.js's deleteExpense (the only other
+ * deletable money-movement in this system before this fix). Safe by
+ * construction: the customer's `remaining` is always computed live from
+ * the underlying Sale/CustomerPayment/SalesReturn collections (see
+ * personBalance.service.js) rather than stored anywhere, so removing this
+ * payment automatically makes their balance correct again — nothing else
+ * needs to be touched or recalculated.
+ */
+export async function deleteCustomerPayment(id) {
+  if (!id || !mongoose.isValidObjectId(id)) {
+    throw new AppError('معرّف السداد غير صالح', 400);
+  }
+  const payment = await CustomerPayment.findById(id);
+  if (!payment) throw new AppError('السداد غير موجود', 404);
+
+  return withTransaction(async (session) => {
+    const customer = await Customer.findById(payment.customerId).session(session);
+
+    await CustomerPayment.deleteOne({ _id: id }, { session });
+    await CashboxTransaction.deleteMany({ refType: 'customer_payment', refId: id }, { session });
+
+    await recordActivity(
+      {
+        type: 'customer',
+        description: `تم حذف سداد بمبلغ ${payment.amount} من العميل ${customer?.name || ''}`,
+        amount: payment.amount,
+      },
+      { session },
+    );
+    await recordAuditLog(
+      {
+        action: 'customer.payment.delete',
+        entityType: 'CustomerPayment',
+        entityId: payment._id,
+        values: { customerId: payment.customerId, amount: payment.amount },
+      },
+      { session },
+    );
+
+    return { success: true };
+  });
+}

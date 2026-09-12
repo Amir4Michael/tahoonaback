@@ -5,19 +5,33 @@ import { recordActivity } from './activityLog.service.js';
 import { recordAuditLog } from './auditLog.service.js';
 import { withTransaction } from '../utils/transactions.js';
 import { getBalance } from './cashbox.service.js';
+import { cairoRangeMatch, cairoTodayBounds, cairoMonthBounds } from '../utils/timezone.js';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
+
+/**
+ * Every distinct reason actually typed on a real expense — the correct
+ * source for the reason FILTER dropdown, which previously listed only a
+ * fixed set of suggested categories (EXPENSE_SUGGESTIONS on the frontend)
+ * regardless of what shows up in the data. Since `reason` is free text (see
+ * ExpensesPage's datalist), someone could type "فاتورة كهربا" once and
+ * "كهرباء" another time and neither would ever appear as a selectable
+ * filter option before this — this is what makes them selectable. Sorted
+ * so the dropdown is stable and easy to scan; empty/blank values can't
+ * occur (createExpense requires a non-empty reason).
+ */
+export async function getDistinctReasons() {
+  const reasons = await Expense.distinct('reason');
+  return reasons.filter(Boolean).sort((a, b) => a.localeCompare(b, 'ar'));
+}
 
 /** Matches ExpensesPage's filters: exact reason (or 'all'), date range. */
 export async function listExpenses({ page = 1, limit = DEFAULT_PAGE_SIZE, reason, from, to } = {}) {
   const match = {};
   if (reason && reason !== 'all') match.reason = reason;
-  if (from || to) {
-    match.date = {};
-    if (from) match.date.$gte = new Date(`${from}T00:00:00`);
-    if (to) match.date.$lte = new Date(`${to}T23:59:59`);
-  }
+  const range = cairoRangeMatch(from, to);
+  if (Object.keys(range).length) match.date = range;
 
   const pageNum = Math.max(1, Math.trunc(Number(page)) || 1);
   const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.trunc(Number(limit)) || DEFAULT_PAGE_SIZE));
@@ -48,13 +62,8 @@ export async function listExpenses({ page = 1, limit = DEFAULT_PAGE_SIZE, reason
 
 /** Today's and this-month's expense totals, for the expenses page header stats. */
 export async function getSummary() {
-  const now = new Date();
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  const endOfToday = new Date();
-  endOfToday.setHours(23, 59, 59, 999);
-  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0);
-  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+  const { start: startOfToday, end: endOfToday } = cairoTodayBounds();
+  const { start: startOfMonth, end: endOfMonth } = cairoMonthBounds();
 
   const [todayResult, monthResult] = await Promise.all([
     Expense.aggregate([

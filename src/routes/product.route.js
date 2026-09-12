@@ -43,7 +43,7 @@ const productListQuerySchema = z.object({
   page: z.coerce.number().int().positive().optional().default(1),
   limit: z.coerce.number().int().positive().max(100).optional().default(20),
   search: z.string().trim().max(200).optional(),
-  filter: z.enum(['all', 'low', 'out', 'available']).optional().default('all'),
+  filter: z.enum(['all', 'low', 'out', 'available', 'hidden']).optional().default('all'),
   sort: z.enum(['name', 'qtyAsc', 'qtyDesc', 'profit']).optional().default('name'),
 });
 
@@ -52,5 +52,6 @@ router.get('/:id', validateObjectIdParam(), controller.getOne);
 router.post('/', validateBody(productCreateSchema), controller.create);
 router.patch('/:id', validateObjectIdParam(), validateBody(productUpdateSchema), controller.update);
 router.delete('/:id', validateObjectIdParam(), controller.remove);
+router.post('/:id/restore', validateObjectIdParam(), controller.restore);
 
 export default router;

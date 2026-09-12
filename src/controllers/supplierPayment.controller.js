@@ -12,3 +12,8 @@ export const create = asyncHandler(async (req, res) => {
   const payment = await supplierPaymentService.createSupplierPayment({ supplierId, amount, note, idempotencyKey });
   res.status(201).json({ success: true, data: payment });
 });
+
+export const remove = asyncHandler(async (req, res) => {
+  await supplierPaymentService.deleteSupplierPayment(req.params.id);
+  res.json({ success: true });
+});

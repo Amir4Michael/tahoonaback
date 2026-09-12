@@ -27,6 +27,15 @@ const productSchema = new Schema(
     // this backend — the frontend uploads directly to System 1's Cloudinary
     // account and only the resulting URL lands here (see Products phase).
     image: { type: String, default: '', trim: true },
+    // false = "hidden" (soft-deleted): the product no longer shows up in
+    // Inventory/POS/Purchases pickers, but the document itself is kept so
+    // that _id still resolves — this is what lets a SalesReturn/
+    // PurchaseReturn for an old invoice still restore stock correctly onto
+    // it, instead of the $inc/$gte update silently matching nothing (see
+    // deleteProduct in product.service.js for when this is used instead of
+    // an actual delete). Absent/undefined is treated as active for any
+    // documents that predate this field.
+    isActive: { type: Boolean, default: true },
   },
   { timestamps: true },
 );

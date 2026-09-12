@@ -9,6 +9,7 @@ import { recordAuditLog } from './auditLog.service.js';
 import { withTransaction } from '../utils/transactions.js';
 import { round2 } from '../models/shared/money.js';
 import { getSupplierRemaining } from './supplierBalance.service.js';
+import { getBalance } from './cashbox.service.js';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -66,6 +67,18 @@ export async function createSupplierPayment({ supplierId, amount, note, idempote
         400,
         { code: 'EXCEEDS_REMAINING', remaining: currentRemaining },
       );
+    }
+
+    // Cash actually leaving the register for this settlement must never
+    // exceed what's actually in it — same balance-sufficiency rule already
+    // enforced for manual withdrawals (cashbox.service.js), expenses
+    // (expense.service.js), and now paid purchases (purchase.service.js).
+    // Checked inside this transaction (via `session`) for the same
+    // race-safety reason as those, and before the payment document is
+    // created so a rejected settlement never leaves partial side effects.
+    const cashboxBalance = await getBalance(session);
+    if (amountNum > cashboxBalance) {
+      throw new AppError('رصيد الصندوق غير كافٍ لدفع هذا السداد', 400);
     }
 
     const balanceAfter = round2(currentRemaining - amountNum);
@@ -148,4 +161,45 @@ export async function listSupplierPayments({ supplierId, page = 1, limit = DEFAU
     items,
     pagination: { page: pageNum, limit: pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
   };
+}
+
+/**
+ * Deletes a supplier payment AND its linked cashbox transaction together —
+ * mirror of customerPayment.service.js's deleteCustomerPayment (see that
+ * docstring for why this is safe: the supplier's `remaining` is always
+ * computed live, never stored, so nothing else needs recalculating).
+ */
+export async function deleteSupplierPayment(id) {
+  if (!id || !mongoose.isValidObjectId(id)) {
+    throw new AppError('معرّف السداد غير صالح', 400);
+  }
+  const payment = await SupplierPayment.findById(id);
+  if (!payment) throw new AppError('السداد غير موجود', 404);
+
+  return withTransaction(async (session) => {
+    const supplier = await Supplier.findById(payment.supplierId).session(session);
+
+    await SupplierPayment.deleteOne({ _id: id }, { session });
+    await CashboxTransaction.deleteMany({ refType: 'supplier_payment', refId: id }, { session });
+
+    await recordActivity(
+      {
+        type: 'supplier',
+        description: `تم حذف سداد بمبلغ ${payment.amount} للمورد ${supplier?.name || ''}`,
+        amount: payment.amount,
+      },
+      { session },
+    );
+    await recordAuditLog(
+      {
+        action: 'supplier.payment.delete',
+        entityType: 'SupplierPayment',
+        entityId: payment._id,
+        values: { supplierId: payment.supplierId, amount: payment.amount },
+      },
+      { session },
+    );
+
+    return { success: true };
+  });
 }

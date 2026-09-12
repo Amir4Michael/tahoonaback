@@ -17,3 +17,8 @@ export const create = asyncHandler(async (req, res) => {
   const tx = await cashboxService.createCashTransaction({ type, amount, reason, date, notes });
   res.status(201).json({ success: true, data: tx });
 });
+
+export const remove = asyncHandler(async (req, res) => {
+  await cashboxService.deleteCashTransaction(req.params.id);
+  res.json({ success: true });
+});

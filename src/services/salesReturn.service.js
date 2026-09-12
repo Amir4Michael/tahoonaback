@@ -47,6 +47,11 @@ export async function getReturnableForSale(saleId) {
 
   const alreadyReturnedMap = await getAlreadyReturnedMap(sale._id);
 
+  // Same ratio createSalesReturn applies — exposed here too so the
+  // "pick items to return" screen can preview the ACTUAL amount a return
+  // will be worth (post-discount), not the pre-discount line price.
+  const discountRatio = sale.subtotal > 0 ? sale.total / sale.subtotal : 1;
+
   const items = sale.items.map((line) => {
     const alreadyReturned = alreadyReturnedMap.get(line.productId.toString()) || 0;
     return {
@@ -57,6 +62,7 @@ export async function getReturnableForSale(saleId) {
       alreadyReturnedQuantity: alreadyReturned,
       availableToReturn: Math.max(0, line.quantity - alreadyReturned),
       originalUnitPrice: line.price,
+      effectiveUnitPrice: round2(line.price * discountRatio),
     };
   });
 
@@ -132,6 +138,15 @@ export async function createSalesReturn({ saleId, items, idempotencyKey }) {
 
     const alreadyReturnedMap = await getAlreadyReturnedMap(sale._id, session);
 
+    // The invoice's flat discount was never distributed across items[] (by
+    // design — see createSale), so a line's own `price` is its PRE-discount
+    // unit price. A return must refund what the customer actually paid per
+    // unit, which is `price` scaled down by the same ratio the whole
+    // invoice was discounted by (total/subtotal) — e.g. a 12.5% invoice
+    // discount means every returned unit is worth 12.5% less too. Falls
+    // back to 1 (no adjustment) for the degenerate subtotal === 0 case.
+    const discountRatio = sale.subtotal > 0 ? sale.total / sale.subtotal : 1;
+
     const lines = [];
     for (const reqItem of items) {
       const saleLine = sale.items.find((l) => l.productId.toString() === String(reqItem.productId));
@@ -157,7 +172,7 @@ export async function createSalesReturn({ saleId, items, idempotencyKey }) {
         code: saleLine.code,
         returnedQuantity: requestedQty,
         originalUnitPrice: saleLine.price,
-        returnAmount: round2(saleLine.price * requestedQty),
+        returnAmount: round2(saleLine.price * requestedQty * discountRatio),
       });
     }
 

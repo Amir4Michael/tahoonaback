@@ -49,6 +49,11 @@ export async function getReturnableForPurchase(purchaseId) {
 
   const alreadyReturnedMap = await getAlreadyReturnedMap(purchase._id);
 
+  // Same ratio createPurchaseReturn applies — exposed here so the "pick
+  // items to return" screen can preview the ACTUAL amount a return will be
+  // worth (post-discount), not the pre-discount line price.
+  const discountRatio = purchase.subtotal > 0 ? purchase.total / purchase.subtotal : 1;
+
   const items = purchase.items.map((line) => {
     const alreadyReturned = alreadyReturnedMap.get(line.productId.toString()) || 0;
     return {
@@ -59,6 +64,7 @@ export async function getReturnableForPurchase(purchaseId) {
       alreadyReturnedQuantity: alreadyReturned,
       availableToReturn: Math.max(0, line.quantity - alreadyReturned),
       originalUnitPrice: line.price,
+      effectiveUnitPrice: round2(line.price * discountRatio),
     };
   });
 
@@ -135,6 +141,12 @@ export async function createPurchaseReturn({ purchaseId, items, idempotencyKey }
 
     const alreadyReturnedMap = await getAlreadyReturnedMap(purchase._id, session);
 
+    // Same reasoning as createSalesReturn: the purchase's flat discount was
+    // never distributed across items[], so a line's own `price` is its
+    // PRE-discount unit price — scale it down by the invoice's overall
+    // discount ratio to get what we actually paid per unit.
+    const discountRatio = purchase.subtotal > 0 ? purchase.total / purchase.subtotal : 1;
+
     const lines = [];
     for (const reqItem of items) {
       const purchaseLine = purchase.items.find((l) => l.productId.toString() === String(reqItem.productId));
@@ -160,7 +172,7 @@ export async function createPurchaseReturn({ purchaseId, items, idempotencyKey }
         code: purchaseLine.code,
         returnedQuantity: requestedQty,
         originalUnitPrice: purchaseLine.price,
-        returnAmount: round2(purchaseLine.price * requestedQty),
+        returnAmount: round2(purchaseLine.price * requestedQty * discountRatio),
       });
     }
 

@@ -23,6 +23,11 @@ export const update = asyncHandler(async (req, res) => {
 });
 
 export const remove = asyncHandler(async (req, res) => {
-  await productService.deleteProduct(req.params.id);
-  res.json({ success: true });
+  const result = await productService.deleteProduct(req.params.id);
+  res.json({ success: true, hidden: result.hidden });
+});
+
+export const restore = asyncHandler(async (req, res) => {
+  const product = await productService.restoreProduct(req.params.id);
+  res.json({ success: true, data: product });
 });

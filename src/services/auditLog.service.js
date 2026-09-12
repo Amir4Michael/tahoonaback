@@ -1,5 +1,6 @@
 import AuditLog from '../models/AuditLog.js';
 import { getRequestContext } from '../utils/requestContext.js';
+import { cairoRangeMatch } from '../utils/timezone.js';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -28,11 +29,8 @@ export async function listAuditLogs({ page = 1, limit = DEFAULT_PAGE_SIZE, actio
   if (action) match.action = action;
   if (entityType) match.entityType = entityType;
   if (actorDeviceId) match.actorDeviceId = actorDeviceId;
-  if (from || to) {
-    match.at = {};
-    if (from) match.at.$gte = new Date(`${from}T00:00:00`);
-    if (to) match.at.$lte = new Date(`${to}T23:59:59`);
-  }
+  const range = cairoRangeMatch(from, to);
+  if (Object.keys(range).length) match.at = range;
 
   const pageNum = Math.max(1, Math.trunc(Number(page)) || 1);
   const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.trunc(Number(limit)) || DEFAULT_PAGE_SIZE));
