@@ -1,6 +1,7 @@
 import Purchase from '../models/Purchase.js';
 import SupplierPayment from '../models/SupplierPayment.js';
 import PurchaseReturn from '../models/PurchaseReturn.js';
+import SupplierCreditReceipt from '../models/SupplierCreditReceipt.js';
 import { getPersonRemaining } from './personBalance.service.js';
 
 /**
@@ -17,6 +18,7 @@ export async function getSupplierRemaining(supplierId, session) {
     TransactionModel: Purchase,
     PaymentModel: SupplierPayment,
     ReturnModel: PurchaseReturn,
+    PayoutModel: SupplierCreditReceipt,
     refField: 'supplierId',
     personId: supplierId,
     session,

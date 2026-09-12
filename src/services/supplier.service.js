@@ -2,6 +2,7 @@ import Supplier from '../models/Supplier.js';
 import Purchase from '../models/Purchase.js';
 import SupplierPayment from '../models/SupplierPayment.js';
 import PurchaseReturn from '../models/PurchaseReturn.js';
+import SupplierCreditReceipt from '../models/SupplierCreditReceipt.js';
 import { createPersonService } from './personService.js';
 
 export const supplierService = createPersonService({
@@ -18,6 +19,10 @@ export const supplierService = createPersonService({
   // / purchaseReturn.service.js) that reduce our running balance without
   // touching any Purchase.
   ReturnModel: PurchaseReturn,
+  // Money WE receive back from the supplier against a creditOwed balance
+  // (see SupplierCreditReceipt.js / supplierCreditReceipt.service.js) —
+  // brings creditOwed back down once the supplier actually settles it.
+  PayoutModel: SupplierCreditReceipt,
   labels: {
     notFound: 'المورد غير موجود',
     deleteBlocked: 'لا يمكن حذف مورد له عمليات شراء مسجلة',

@@ -9,6 +9,7 @@ import { recordAuditLog } from './auditLog.service.js';
 import { withTransaction } from '../utils/transactions.js';
 import { round2 } from '../models/shared/money.js';
 import { getCustomerRemaining } from './customerBalance.service.js';
+import { getBalance } from './cashbox.service.js';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -161,6 +162,17 @@ export async function listCustomerPayments({ customerId, page = 1, limit = DEFAU
  * personBalance.service.js) rather than stored anywhere, so removing this
  * payment automatically makes their balance correct again — nothing else
  * needs to be touched or recalculated.
+ *
+ * This payment was a cashbox 'in' — removing it effectively un-happens that
+ * inflow. If that money has SINCE been spent (a purchase, an expense,
+ * anything), the cashbox's live balance (always a running sum, never a
+ * stored figure) would go negative the instant this is removed — a real,
+ * confirmed gap before this fix, symmetric to the balance-sufficiency check
+ * already enforced on the CREATION side of every 'out' transaction
+ * (purchase payments, supplier settlements, manual withdrawals, expenses).
+ * Rejected outright rather than silently allowed: the shop owner must
+ * settle the register first (e.g. record the correct payment) before this
+ * deletion can go through.
  */
 export async function deleteCustomerPayment(id) {
   if (!id || !mongoose.isValidObjectId(id)) {
@@ -171,6 +183,15 @@ export async function deleteCustomerPayment(id) {
 
   return withTransaction(async (session) => {
     const customer = await Customer.findById(payment.customerId).session(session);
+
+    const cashboxBalance = await getBalance(session);
+    if (cashboxBalance - payment.amount < 0) {
+      throw new AppError(
+        'متقدرش تحذف السداد ده — الفلوس دي اتصرفت خلاص في حاجة تانية، والصندوق مش هيقدر يستحمل نقصانها دلوقتي',
+        400,
+        { code: 'WOULD_GO_NEGATIVE' },
+      );
+    }
 
     await CustomerPayment.deleteOne({ _id: id }, { session });
     await CashboxTransaction.deleteMany({ refType: 'customer_payment', refId: id }, { session });

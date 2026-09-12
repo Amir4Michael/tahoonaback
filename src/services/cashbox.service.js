@@ -160,6 +160,24 @@ export async function deleteCashTransaction(id) {
   }
 
   return withTransaction(async (session) => {
+    // Removing an 'in' entry effectively un-happens that inflow — if that
+    // money has since been spent, the live balance (a running sum, never
+    // stored) would go negative the instant this is removed. Same
+    // balance-sufficiency reasoning as the CREATION-side check on 'out'
+    // transactions above, just applied to deleting an 'in' one instead.
+    // Deleting an 'out' entry never has this risk (it only gives money
+    // back), so no check is needed in that direction.
+    if (tx.type === 'in') {
+      const balance = await getBalance(session);
+      if (balance - tx.amount < 0) {
+        throw new AppError(
+          'متقدرش تحذف الحركة دي — الفلوس دي اتصرفت خلاص في حاجة تانية، والصندوق مش هيقدر يستحمل نقصانها دلوقتي',
+          400,
+          { code: 'WOULD_GO_NEGATIVE' },
+        );
+      }
+    }
+
     await CashboxTransaction.deleteOne({ _id: id }, { session });
 
     await recordActivity(

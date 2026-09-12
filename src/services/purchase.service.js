@@ -21,12 +21,12 @@ function escapeRegex(str) {
 
 /**
  * Creates a purchase in a single MongoDB transaction: validates every line,
- * recalculates each affected product's weighted-average cost AND quantity,
- * writes the Purchase, records the cashbox movement (if anything was paid),
- * and logs the activity entry — all together, or none of it. Same
- * atomicity reasoning as createSale (see sale.service.js and the README):
- * a failed purchase must never leave a product's cost/quantity updated with
- * nothing to show for it.
+ * updates each affected product's cost (see below) AND quantity, writes the
+ * Purchase, records the cashbox movement (if anything was paid), and logs
+ * the activity entry — all together, or none of it. Same atomicity
+ * reasoning as createSale (see sale.service.js and the README): a failed
+ * purchase must never leave a product's cost/quantity updated with nothing
+ * to show for it.
  *
  * Mirrors the frontend's addPurchaseSvc validation order and messages
  * exactly: no supplier -> empty items -> per-line checks (existence,
@@ -34,11 +34,11 @@ function escapeRegex(str) {
  *
  * `discount` is a FLAT (fixed-amount) reduction on the purchase's
  * `subtotal` as a whole — it is never distributed across `items[]`, so
- * every line's `price` (which FEEDS the weighted-average cost recalculation
- * on the product below) always stays the actual per-unit price paid in this
- * batch. The client's `total`/`discount` are never trusted: `subtotal` is
- * recomputed here from the validated lines, and `discount` is re-validated
- * against that recomputed `subtotal`.
+ * every line's `price` (which sets the product's new cost below) always
+ * stays the actual per-unit price paid in this batch. The client's
+ * `total`/`discount` are never trusted: `subtotal` is recomputed here from
+ * the validated lines, and `discount` is re-validated against that
+ * recomputed `subtotal`.
  */
 export async function createPurchase({ supplierId, items, paymentMethod, paid, date, notes, discount }) {
   if (!supplierId) {
@@ -97,53 +97,44 @@ export async function createPurchase({ supplierId, items, paymentMethod, paid, d
       }
     }
 
-    // Weighted-average cost, computed via a MongoDB aggregation-pipeline
-    // update (the array form of the `update` argument) rather than a
-    // separate read-then-write: the new quantity/purchasePrice are derived
-    // FROM THE DOCUMENT'S CURRENT STATE atomically, as part of the single
-    // write itself. This means there is no read/write race window to worry
-    // about at all — not even within this same transaction for a purchase
-    // that (unusually) lists the same product on two lines, since each
-    // update reads-and-writes the current document state in one atomic step.
-    // Example: 6 @ 10 already in stock + 6 @ 15 new => (6*10+6*15)/12 = 12.5
+    // Cost = the price of the MOST RECENT purchase for this product — not a
+    // weighted average. This is a deliberate shop-specific choice (they
+    // don't want old, cheaper stock dragging today's cost basis down when a
+    // supplier raises prices): every purchase of a product simply
+    // overwrites its purchasePrice with this line's price, full stop.
+    // Quantity still accumulates as always — only the cost calculation
+    // changed. Still done via the same atomic aggregation-pipeline update
+    // (rather than a separate read-then-write) for the same reason as
+    // before: no read/write race window, even for a purchase that lists the
+    // same product on two lines — each line's update simply overwrites
+    // purchasePrice again, so whichever line is processed LAST naturally
+    // wins, with no special-casing needed for that.
+    const priceWarnings = [];
     for (const line of lines) {
-      const result = await Product.updateOne(
+      const updated = await Product.findOneAndUpdate(
         { _id: line.productId },
         [
           {
             $set: {
               quantity: { $add: ['$quantity', line.quantity] },
-              purchasePrice: {
-                $let: {
-                  vars: { newTotalQty: { $add: ['$quantity', line.quantity] } },
-                  in: {
-                    $cond: [
-                      { $gt: ['$$newTotalQty', 0] },
-                      {
-                        $round: [
-                          {
-                            $divide: [
-                              { $add: [{ $multiply: ['$quantity', '$purchasePrice'] }, line.quantity * line.price] },
-                              '$$newTotalQty',
-                            ],
-                          },
-                          2,
-                        ],
-                      },
-                      line.price,
-                    ],
-                  },
-                },
-              },
+              purchasePrice: line.price,
             },
           },
         ],
-        { session },
+        { session, new: true, projection: { purchasePrice: 1, salePrice: 1, name: 1 } },
       );
-      if (result.matchedCount === 0) {
+      if (!updated) {
         // Only reachable if the product was deleted between the validation
         // read above and this write, within the same transaction.
         throw new AppError(`المنتج غير موجود: ${line.name}`, 404);
+      }
+      // Flag right here, at the exact moment a purchase is what pushed the
+      // cost to this point — the natural place to notice, rather than only
+      // discovering it later while selling at a loss. Never blocks the
+      // purchase itself; see product.service.js's `needsReview` filter for
+      // the standing way to find every such product later too.
+      if (updated.purchasePrice >= updated.salePrice) {
+        priceWarnings.push({ productId: updated._id, name: updated.name, purchasePrice: updated.purchasePrice, salePrice: updated.salePrice });
       }
     }
 
@@ -215,10 +206,10 @@ export async function createPurchase({ supplierId, items, paymentMethod, paid, d
       { session },
     );
 
-    return createdPurchase;
+    return { createdPurchase, priceWarnings };
   });
 
-  return purchase;
+  return { ...purchase.createdPurchase.toObject(), priceWarnings: purchase.priceWarnings };
 }
 
 /**

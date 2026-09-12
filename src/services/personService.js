@@ -11,48 +11,7 @@ function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/**
- * Customer and Supplier are structurally identical: name/phone/address,
- * blocked deletion when they have transactions on file, name-or-phone
- * substring search, and totals rolled up from a related transaction
- * collection (Sale for customers, Purchase for suppliers). Rather than
- * duplicate the same CRUD + aggregation logic twice with different field
- * names, this factory takes the handful of things that actually differ.
- *
- * `getTotals` mirrors the frontend's `customerTotals`/`supplierTotals`
- * selectors exactly: `{ total, paid, remaining, count, lastPurchase }`.
- *
- * `PaymentModel` is OPTIONAL and currently only passed for Customer (see
- * customer.service.js) — standalone settlements (CustomerPayment) that
- * reduce a customer's running balance without being tied to any single
- * Sale. When provided, every payment for a person is folded into `paid`/
- * `remaining` here, in ONE place, so `list`, `getOne`, and `getTotals` can
- * never drift out of sync with each other (a duplicated aggregation in each
- * call site risks exactly that). Supplier never passes this, so its
- * behavior — pipeline shape, values, everything — is byte-for-byte
- * unchanged from before this parameter existed.
- *
- * `ReturnModel` is the same idea for standalone SalesReturn documents —
- * folded into `remaining` ONLY (never `paid`, which stays actual cash
- * received), and `total` is left showing the raw gross sales sum on
- * purpose: a return reduces what the customer effectively owes without
- * rewriting the historical "total sold" figure.
- *
- * A return is NEVER rejected for exceeding what the person owed (return
- * eligibility is quantity-based only — see salesReturn.service.js /
- * purchaseReturn.service.js), so this subtraction can legitimately go
- * negative (e.g. a fully-paid customer returns goods). `remaining` is
- * floored at 0 (matches every money field's own `min: 0` in this project —
- * nothing here has ever displayed a negative amount owed), and the excess
- * is surfaced separately as `creditOwed`: money the shop owes BACK to this
- * person. This is a transparent, read-only figure only — not a stored,
- * spendable, or redeemable balance (the system has no such concept, and
- * this does not invent one); it does not touch the cashbox by itself. See
- * services/customerBalance.service.js / supplierBalance.service.js for the
- * exact same formula used inside a transaction when validating a new
- * payment/return.
- */
-export function createPersonService({ Model, TransactionModel, refField, activityType, entityType, labels, PaymentModel, ReturnModel }) {
+export function createPersonService({ Model, TransactionModel, refField, activityType, entityType, labels, PaymentModel, ReturnModel, PayoutModel }) {
   async function getTotals(personId) {
     const [result] = await TransactionModel.aggregate([
       { $match: { [refField]: new mongoose.Types.ObjectId(personId) } },
@@ -88,11 +47,18 @@ export function createPersonService({ Model, TransactionModel, refField, activit
       const returned = returnResult?.returned || 0;
       base.returned = returned;
       base.remaining -= returned;
-      // Floor at 0 + surface any excess as creditOwed — see the doc block
-      // above. Only relevant once ReturnModel exists, since neither Sale/
-      // Purchase (bounded per-transaction) nor CustomerPayment/SupplierPayment
-      // (already rejected past the balance) can push remaining negative on
-      // their own.
+
+      let paidOut = 0;
+      if (PayoutModel) {
+        const [payoutResult] = await PayoutModel.aggregate([
+          { $match: { [refField]: new mongoose.Types.ObjectId(personId) } },
+          { $group: { _id: null, paidOut: { $sum: '$amount' } } },
+        ]);
+        paidOut = payoutResult?.paidOut || 0;
+        base.paidOut = paidOut;
+        base.remaining += paidOut;
+      }
+
       base.creditOwed = base.remaining < 0 ? round2(-base.remaining) : 0;
       base.remaining = base.remaining < 0 ? 0 : round2(base.remaining);
     }
@@ -100,11 +66,6 @@ export function createPersonService({ Model, TransactionModel, refField, activit
     return base;
   }
 
-  /**
-   * One aggregation ($lookup + $facet) per request — totals are computed only
-   * for the current page of results (bounded work), and the page of items
-   * plus the total count for pagination come back in a single round-trip.
-   */
   async function list({ page = 1, limit = DEFAULT_PAGE_SIZE, search } = {}) {
     const match = {};
     if (search && search.trim()) {
@@ -116,9 +77,6 @@ export function createPersonService({ Model, TransactionModel, refField, activit
     const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.trunc(Number(limit)) || DEFAULT_PAGE_SIZE));
     const skip = (pageNum - 1) * pageSize;
 
-    // The payment/return lookup+adjustment stages are only added when
-    // PaymentModel/ReturnModel are provided (Customer) — Supplier's
-    // pipeline is built exactly as before, stage for stage.
     const itemsPipeline = [
       { $skip: skip },
       { $limit: pageSize },
@@ -170,25 +128,41 @@ export function createPersonService({ Model, TransactionModel, refField, activit
       );
     }
 
+    if (ReturnModel && PayoutModel) {
+      itemsPipeline.push(
+        {
+          $lookup: {
+            from: PayoutModel.collection.name,
+            localField: '_id',
+            foreignField: refField,
+            as: '_payouts',
+          },
+        },
+        { $addFields: { 'totals.paidOut': { $sum: '$_payouts.amount' } } },
+      );
+    }
+
     const excludeProjection = { _tx: 0 };
     if (PaymentModel) excludeProjection._payments = 0;
     if (ReturnModel) excludeProjection._returns = 0;
+    if (ReturnModel && PayoutModel) excludeProjection._payouts = 0;
 
     itemsPipeline.push(
       {
         $addFields: {
           'totals.remaining': ReturnModel
-            ? { $subtract: [{ $subtract: ['$totals.total', '$totals.paid'] }, '$totals.returned'] }
+            ? {
+              $add: [
+                { $subtract: [{ $subtract: ['$totals.total', '$totals.paid'] }, '$totals.returned'] },
+                PayoutModel ? '$totals.paidOut' : 0,
+              ],
+            }
             : { $subtract: ['$totals.total', '$totals.paid'] },
         },
       },
     );
 
     if (ReturnModel) {
-      // Same floor-at-0 + creditOwed split as getTotals — a return can
-      // legitimately push the raw remaining negative (return eligibility is
-      // quantity-based only, never blocked by balance), and that excess is
-      // surfaced rather than hidden or clamped away silently.
       itemsPipeline.push({
         $addFields: {
           'totals.creditOwed': { $cond: [{ $lt: ['$totals.remaining', 0] }, { $multiply: ['$totals.remaining', -1] }, 0] },
@@ -220,16 +194,6 @@ export function createPersonService({ Model, TransactionModel, refField, activit
     return { ...plain, totals };
   }
 
-  /**
-   * Existing people who share this new one's phone (exact — a phone number
-   * genuinely identifies one person) OR name (case/whitespace-insensitive
-   * exact match — catches "أحمد علي" vs "احمد على" typo-level variance
-   * only, not a fuzzy/partial match that would flag unrelated people who
-   * simply share a first name). Used to warn before creating what might be
-   * an accidental second record for someone who already exists — nothing
-   * here is a hard uniqueness rule; two genuinely different people can
-   * share a name, and this never blocks — see `create`.
-   */
   async function findDuplicates({ name, phone }) {
     const or = [];
     if (name && name.trim()) {
@@ -242,16 +206,6 @@ export function createPersonService({ Model, TransactionModel, refField, activit
     return Model.find({ $or: or }).limit(5).select('name phone address').lean();
   }
 
-  /**
-   * `allowDuplicate` (default false): when a possible duplicate exists (see
-   * findDuplicates) and this isn't set, the create is rejected with a 409
-   * carrying the matches, instead of silently creating a second record for
-   * someone who may already be in the system — a real, confirmed gap
-   * before this fix (nothing checked this at all). The frontend shows
-   * those matches and lets the person confirm they genuinely want a new,
-   * separate record, then resubmits with `allowDuplicate: true` to go
-   * through anyway — this never becomes a hard block.
-   */
   async function create(data, { allowDuplicate = false } = {}) {
     if (!allowDuplicate) {
       const duplicates = await findDuplicates(data);
@@ -299,13 +253,6 @@ export function createPersonService({ Model, TransactionModel, refField, activit
     return person;
   }
 
-  /**
-   * Checks for existing transactions BEFORE checking the person exists —
-   * matching the frontend's exact check order in delete{Customer,Supplier}Svc.
-   * When PaymentModel is provided, a person with standalone payments on file
-   * (even with no Sale, an edge case in practice) is blocked the same way —
-   * deleting them would otherwise orphan those payment records.
-   */
   async function remove(id) {
     const hasTransactions = await TransactionModel.exists({ [refField]: id });
     if (hasTransactions) throw new AppError(labels.deleteBlocked, 409, { code: 'HAS_TRANSACTIONS' });

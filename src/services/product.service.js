@@ -19,6 +19,7 @@ const DUPLICATE_CODE_ERROR = () => new AppError('كود المنتج مستخد�
  * Matches the current frontend's InventoryPage exactly:
  * - search: substring match (case-insensitive) on name OR code
  * - filter: 'low' (0 < qty <= minQuantity), 'out' (qty <= 0), 'available' (qty > minQuantity),
+ *           'needsReview' (purchasePrice >= salePrice — selling at zero or negative margin),
  *           'hidden' (isActive === false — soft-deleted products, see deleteProduct)
  * - sort: 'name' (Arabic-locale order, default), 'qtyAsc', 'qtyDesc', 'profit' (salePrice - purchasePrice, desc)
  *
@@ -47,6 +48,16 @@ export async function listProducts({ page = 1, limit = DEFAULT_PAGE_SIZE, search
     match.isActive = { $ne: false };
   } else if (filter === 'available') {
     match.$expr = { $gt: ['$quantity', '$minQuantity'] };
+    match.isActive = { $ne: false };
+  } else if (filter === 'needsReview') {
+    // Cost has caught up to (or passed) the sale price — most commonly
+    // because a supplier raised their price on a recent purchase (cost is
+    // simply overwritten to that purchase's price — see createPurchase)
+    // while the sale price was never manually raised to match (see
+    // createPurchase's own priceWarnings for the point-of-purchase version
+    // of this same check). Selling at this price now yields zero or
+    // negative margin.
+    match.$expr = { $gte: ['$purchasePrice', '$salePrice'] };
     match.isActive = { $ne: false };
   } else if (filter === 'hidden') {
     match.isActive = false;

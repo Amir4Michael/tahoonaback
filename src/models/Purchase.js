@@ -7,10 +7,11 @@ const { Schema, model, models } = mongoose;
 /**
  * Like a sale line, a purchase line is a SNAPSHOT (`name`/`code`/`price` at
  * the time of purchase) — it must keep reporting exactly what was actually
- * paid per unit in this batch, even after the product's current
- * weighted-average cost has since moved on. `price` here is this batch's
- * purchase cost per unit; it FEEDS the weighted-average recalculation on the
- * product (done in the service layer) but is never itself overwritten by it.
+ * paid per unit in this batch, even after the product's current cost has
+ * since moved on to a later purchase's price. `price` here is this batch's
+ * purchase cost per unit; it's what the product's `purchasePrice` gets
+ * overwritten to (done in the service layer) but this snapshot itself is
+ * never rewritten by that.
  */
 const purchaseItemSchema = new Schema(
   {
@@ -49,8 +50,8 @@ const purchaseSchema = new Schema(
     }),
     // Flat (fixed-amount) discount applied to the purchase as a whole —
     // never distributed across individual lines, so `items[].price` (which
-    // FEEDS the weighted-average cost recalculation on the product) always
-    // stays the actual per-unit price paid in this batch.
+    // becomes the product's new cost) always stays the actual per-unit
+    // price paid in this batch.
     discount: moneyField({ required: true, default: 0 }),
     // Final amount owed to the supplier for this purchase: subtotal -
     // discount. `paid`/`remaining` and every existing consumer of `total`

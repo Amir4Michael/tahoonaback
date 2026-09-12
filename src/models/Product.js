@@ -4,11 +4,13 @@ import { moneyField } from './shared/money.js';
 const { Schema, model, models } = mongoose;
 
 /**
- * `purchasePrice` is the product's CURRENT weighted-average cost — it moves
- * every time new stock is purchased at a different price (see the Purchases
- * phase's weighted-average logic). `salePrice` is just the default asking
- * price shown at POS; an individual sale line can record a different actual
- * price without ever writing back to this field (see Sale.items[].price).
+ * `purchasePrice` is the product's CURRENT cost — it's simply overwritten
+ * with the price paid every time new stock is purchased (see the Purchases
+ * phase; a deliberate shop choice, not a weighted average — an old, cheaper
+ * batch never drags today's cost basis down). `salePrice` is just the
+ * default asking price shown at POS; an individual sale line can record a
+ * different actual price without ever writing back to this field (see
+ * Sale.items[].price).
  *
  * Neither field is ever read to reinterpret a past Sale/Purchase — those
  * keep their own snapshot values in their `items[]`, independent of whatever

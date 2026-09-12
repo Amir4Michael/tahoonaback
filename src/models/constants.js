@@ -11,7 +11,7 @@ export const CASHBOX_TX_TYPES = ['in', 'out'];
 // recorded as its own type since it isn't tied to any single invoice (see
 // CustomerPayment.js). 'supplier_payment' is the mirror image — cash WE pay
 // out to a supplier later against our running balance (see SupplierPayment.js).
-export const CASHBOX_REF_TYPES = ['sale', 'purchase', 'expense', 'manual', 'customer_payment', 'supplier_payment'];
+export const CASHBOX_REF_TYPES = ['sale', 'purchase', 'expense', 'manual', 'customer_payment', 'supplier_payment', 'customer_credit_payout', 'supplier_credit_receipt'];
 
 // Human-readable activity feed types — matches the current frontend's
 // `state.activity` exactly. Not to be confused with the future, more

@@ -9,6 +9,7 @@ import SupplierPayment from '../models/SupplierPayment.js';
 import SalesReturn from '../models/SalesReturn.js';
 import PurchaseReturn from '../models/PurchaseReturn.js';
 import { cairoRangeMatch } from '../utils/timezone.js';
+import { round2 } from '../models/shared/money.js';
 
 // Generous cap for an unlimited "full table" request (e.g. the purchases
 // report's supplier-balances table, which the frontend renders unpaginated
@@ -308,26 +309,62 @@ export async function getProfitReport({ from, to } = {}) {
   return { revenue, discount, cogs, gross, expenses, net: gross - expenses };
 }
 
-/** Inventory tab: a snapshot of the CURRENT catalog — never date-filtered. */
+/**
+ * Inventory tab: a snapshot of the CURRENT catalog — never date-filtered.
+ *
+ * `items`: the per-product breakdown behind the summary numbers above —
+ * name/code/quantity/purchasePrice/salePrice/minQuantity plus derived
+ * `totalValue` (quantity × purchasePrice) and `unitProfit`
+ * (salePrice − purchasePrice), sorted by name. Hidden products (isActive:
+ * false — see product.service.js's deleteProduct) are excluded here, same
+ * as everywhere else they're kept out of day-to-day views; they're still
+ * counted in the summary stats above though; since that reflects stock the
+ * shop still physically owns regardless of whether it's listable right now.
+ * Capped at FULL_LIST_SAFETY_CAP for the same reason as the purchases
+ * report's supplier-balances table (protects against a pathological
+ * catalog size without changing behavior at the scale this system targets).
+ */
 export async function getInventoryReport() {
-  const [result] = await Product.aggregate([
-    {
-      $group: {
-        _id: null,
-        productsCount: { $sum: 1 },
-        totalQuantity: { $sum: '$quantity' },
-        costValue: { $sum: { $multiply: ['$purchasePrice', '$quantity'] } },
-        saleValue: { $sum: { $multiply: ['$salePrice', '$quantity'] } },
-        lowCount: {
-          $sum: { $cond: [{ $and: [{ $gt: ['$quantity', 0] }, { $lte: ['$quantity', '$minQuantity'] }] }, 1, 0] },
+  const [summaryResult, items] = await Promise.all([
+    Product.aggregate([
+      {
+        $group: {
+          _id: null,
+          productsCount: { $sum: 1 },
+          totalQuantity: { $sum: '$quantity' },
+          costValue: { $sum: { $multiply: ['$purchasePrice', '$quantity'] } },
+          saleValue: { $sum: { $multiply: ['$salePrice', '$quantity'] } },
+          lowCount: {
+            $sum: { $cond: [{ $and: [{ $gt: ['$quantity', 0] }, { $lte: ['$quantity', '$minQuantity'] }] }, 1, 0] },
+          },
+          outCount: { $sum: { $cond: [{ $lte: ['$quantity', 0] }, 1, 0] } },
         },
-        outCount: { $sum: { $cond: [{ $lte: ['$quantity', 0] }, 1, 0] } },
       },
-    },
+    ]),
+    Product.find({ isActive: { $ne: false } })
+      .sort({ name: 1 })
+      .limit(FULL_LIST_SAFETY_CAP)
+      .select('name code quantity purchasePrice salePrice minQuantity')
+      .lean(),
   ]);
 
+  const [result] = summaryResult;
   const stats = result || { productsCount: 0, totalQuantity: 0, costValue: 0, saleValue: 0, lowCount: 0, outCount: 0 };
-  return { ...stats, expectedProfit: stats.saleValue - stats.costValue };
+  return {
+    ...stats,
+    expectedProfit: stats.saleValue - stats.costValue,
+    items: items.map((p) => ({
+      productId: p._id,
+      name: p.name,
+      code: p.code,
+      quantity: p.quantity,
+      purchasePrice: p.purchasePrice,
+      salePrice: p.salePrice,
+      minQuantity: p.minQuantity,
+      totalValue: round2(p.quantity * p.purchasePrice),
+      unitProfit: round2(p.salePrice - p.purchasePrice),
+    })),
+  };
 }
 
 export async function getCustomersReport({ limit = 8 } = {}) {

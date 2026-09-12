@@ -43,7 +43,7 @@ const productListQuerySchema = z.object({
   page: z.coerce.number().int().positive().optional().default(1),
   limit: z.coerce.number().int().positive().max(100).optional().default(20),
   search: z.string().trim().max(200).optional(),
-  filter: z.enum(['all', 'low', 'out', 'available', 'hidden']).optional().default('all'),
+  filter: z.enum(['all', 'low', 'out', 'available', 'needsReview', 'hidden']).optional().default('all'),
   sort: z.enum(['name', 'qtyAsc', 'qtyDesc', 'profit']).optional().default('name'),
 });
 
