@@ -312,14 +312,32 @@ export async function getProfitReport({ from, to } = {}) {
 /**
  * Inventory tab: a snapshot of the CURRENT catalog — never date-filtered.
  *
+ * `productsCount`/`lowCount`/`outCount` count only ACTIVE products — the
+ * ones actually visible in Inventory/POS/Purchases day to day — so this
+ * number always matches what the shop owner can see and count themselves.
+ * Hidden products (isActive: false — see product.service.js's
+ * deleteProduct) are surfaced separately as `hiddenCount`, rather than
+ * silently folded into `productsCount`: mixing them in there produced a
+ * confirmed, confusing bug — the count would read higher than however many
+ * products the shop owner could actually find in their own list, with
+ * nothing explaining the gap.
+ *
+ * `totalQuantity`/`costValue`/`saleValue` still total across ALL products,
+ * hidden included — that stock is real and still owned by the shop even
+ * `totalQuantity`/`costValue`/`saleValue` now ALSO count only active
+ * products, matching `productsCount` — a shop owner comparing this number
+ * against their own visible product list is exactly the case that must
+ * match, and a "quantity/value includes stock I can't currently see or
+ * sell" figure was a second, separate source of the same confusion as
+ * `productsCount` above. Hidden stock's value is instead surfaced
+ * separately as `hiddenValue`, so it's never silently absorbed into the
+ * headline number, but also never claimed as part of what's on the floor.
+ *
  * `items`: the per-product breakdown behind the summary numbers above —
  * name/code/quantity/purchasePrice/salePrice/minQuantity plus derived
  * `totalValue` (quantity × purchasePrice) and `unitProfit`
- * (salePrice − purchasePrice), sorted by name. Hidden products (isActive:
- * false — see product.service.js's deleteProduct) are excluded here, same
- * as everywhere else they're kept out of day-to-day views; they're still
- * counted in the summary stats above though; since that reflects stock the
- * shop still physically owns regardless of whether it's listable right now.
+ * (salePrice − purchasePrice), sorted by name. Hidden products are excluded
+ * here too, same as everywhere else they're kept out of day-to-day views.
  * Capped at FULL_LIST_SAFETY_CAP for the same reason as the purchases
  * report's supplier-balances table (protects against a pathological
  * catalog size without changing behavior at the scale this system targets).
@@ -330,14 +348,30 @@ export async function getInventoryReport() {
       {
         $group: {
           _id: null,
-          productsCount: { $sum: 1 },
-          totalQuantity: { $sum: '$quantity' },
-          costValue: { $sum: { $multiply: ['$purchasePrice', '$quantity'] } },
-          saleValue: { $sum: { $multiply: ['$salePrice', '$quantity'] } },
-          lowCount: {
-            $sum: { $cond: [{ $and: [{ $gt: ['$quantity', 0] }, { $lte: ['$quantity', '$minQuantity'] }] }, 1, 0] },
+          productsCount: { $sum: { $cond: [{ $ne: ['$isActive', false] }, 1, 0] } },
+          hiddenCount: { $sum: { $cond: [{ $eq: ['$isActive', false] }, 1, 0] } },
+          totalQuantity: { $sum: { $cond: [{ $ne: ['$isActive', false] }, '$quantity', 0] } },
+          costValue: {
+            $sum: { $cond: [{ $ne: ['$isActive', false] }, { $multiply: ['$purchasePrice', '$quantity'] }, 0] },
           },
-          outCount: { $sum: { $cond: [{ $lte: ['$quantity', 0] }, 1, 0] } },
+          saleValue: {
+            $sum: { $cond: [{ $ne: ['$isActive', false] }, { $multiply: ['$salePrice', '$quantity'] }, 0] },
+          },
+          hiddenValue: {
+            $sum: { $cond: [{ $eq: ['$isActive', false] }, { $multiply: ['$purchasePrice', '$quantity'] }, 0] },
+          },
+          lowCount: {
+            $sum: {
+              $cond: [
+                { $and: [{ $ne: ['$isActive', false] }, { $gt: ['$quantity', 0] }, { $lte: ['$quantity', '$minQuantity'] }] },
+                1,
+                0,
+              ],
+            },
+          },
+          outCount: {
+            $sum: { $cond: [{ $and: [{ $ne: ['$isActive', false] }, { $lte: ['$quantity', 0] }] }, 1, 0] },
+          },
         },
       },
     ]),
@@ -349,7 +383,7 @@ export async function getInventoryReport() {
   ]);
 
   const [result] = summaryResult;
-  const stats = result || { productsCount: 0, totalQuantity: 0, costValue: 0, saleValue: 0, lowCount: 0, outCount: 0 };
+  const stats = result || { productsCount: 0, hiddenCount: 0, totalQuantity: 0, costValue: 0, saleValue: 0, hiddenValue: 0, lowCount: 0, outCount: 0 };
   return {
     ...stats,
     expectedProfit: stats.saleValue - stats.costValue,
