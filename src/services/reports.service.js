@@ -156,8 +156,136 @@ async function getPersonBalanceReport(Model, TransactionModel, refField, limit, 
  * but exact, question: "how much credit did sales in this period leave
  * uncollected, net of what was later returned".
  */
+/**
+ * Sales-returns breakdown for a date range — shared by getSalesReport
+ * (Sales Returns / Net Sales / per-product Returned) and getProfitReport
+ * (Sales Returns / Returned COGS / Net Revenue / Net COGS), so the two tabs
+ * can never compute "how many returns happened this period" differently
+ * from each other.
+ *
+ * DATE CONVENTION (deliberate, and different from `creditOutstandingAtSale`
+ * elsewhere in this file): matched by the RETURN's OWN `date`, NOT the
+ * date of the sale it's against. A period report must only reflect what
+ * actually happened during that period — a return processed in April
+ * against a March sale is an April event; counting it in March's report
+ * just because the sale happened to fall there would mean a March report
+ * printed on April 1st and reprinted on April 5th could show different
+ * numbers for the exact same March, which defeats the point of a period
+ * report. (`creditOutstandingAtSale` is intentionally different: it
+ * answers "how much of THIS SPECIFIC invoice is still uncollected right
+ * now", a live per-invoice figure, not a period total — see its own
+ * docstring above.)
+ *
+ * One consequence of this convention, by design: a product's `returnedQty`
+ * (and therefore Net Sold) is NOT restricted to only sales that themselves
+ * fall in this same range — a return this period of a product sold last
+ * period still counts here. This can make Net Sold read lower than Gross
+ * Sold sold-this-period alone, or even negative in an unusual period, and
+ * that is not a bug — it is what a period-accurate return figure has to
+ * allow for whenever a return doesn't land in the same period as its sale.
+ *
+ * `returnedCogs` is pulled from the ORIGINAL sale's own item snapshot
+ * (`Sale.items.cost` — frozen at the moment that sale was made), NEVER
+ * from the product's current `purchasePrice` — the whole point of a
+ * snapshot is that it keeps reporting what those specific units actually
+ * cost back then, unaffected by any purchase made since (see Sale.js /
+ * Product.js). Matched back to that one specific original sale via
+ * `saleId` (never ambiguous: a single sale's own cart never lists the same
+ * product on two separate lines — see PosPage's addToCart, which merges
+ * quantity into the existing line instead — so "the cost of this product
+ * in that sale" always resolves to exactly one value).
+ *
+ * `totalReturnAmount` already has the sale's own discount ratio baked in
+ * (see createSalesReturn), so summing it directly here — with no further
+ * discount adjustment — is what keeps Sales Returns and Gross Sales
+ * (also already discount-adjusted, via Sale.total) comparable without
+ * double-counting or double-discounting either figure.
+ */
+async function getSalesReturnsBreakdown(from, to) {
+  const [result] = await SalesReturn.aggregate([
+    { $match: dateRangeMatch(from, to) },
+    {
+      $facet: {
+        // Grouped from the ORIGINAL (not yet unwound) return documents —
+        // `totalReturnAmount` is a per-RETURN figure, so summing it must
+        // happen before any $unwind of items, or a multi-item return would
+        // get counted once per item instead of once per return.
+        overall: [
+          { $group: { _id: null, salesReturns: { $sum: '$totalReturnAmount' } } },
+        ],
+        returnedCogs: [
+          { $unwind: '$items' },
+          {
+            $lookup: {
+              from: Sale.collection.name,
+              localField: 'saleId',
+              foreignField: '_id',
+              as: '_sale',
+            },
+          },
+          { $unwind: '$_sale' },
+          {
+            $addFields: {
+              _originalCost: {
+                $let: {
+                  vars: {
+                    matchedLine: {
+                      $arrayElemAt: [
+                        { $filter: { input: '$_sale.items', cond: { $eq: ['$$this.productId', '$items.productId'] } } },
+                        0,
+                      ],
+                    },
+                  },
+                  in: '$$matchedLine.cost',
+                },
+              },
+            },
+          },
+          { $group: { _id: null, sum: { $sum: { $multiply: ['$_originalCost', '$items.returnedQuantity'] } } } },
+        ],
+        byProduct: [
+          { $unwind: '$items' },
+          { $group: { _id: '$items.productId', returnedQty: { $sum: '$items.returnedQuantity' } } },
+        ],
+      },
+    },
+  ]);
+
+  const salesReturns = result?.overall[0]?.salesReturns || 0;
+  const returnedCogs = result?.returnedCogs[0]?.sum || 0;
+  const byProduct = new Map((result?.byProduct || []).map((r) => [r._id.toString(), r.returnedQty]));
+  return { salesReturns, returnedCogs, byProduct };
+}
+
+/**
+ * Sales tab: revenue/collection stats for the range, plus best-selling
+ * products (by quantity).
+ *
+ * `grossSales`/`salesReturns`/`netSales`: see getSalesReturnsBreakdown's
+ * docstring for the date convention (returns matched by their OWN date,
+ * not their original sale's).
+ *
+ * `creditOutstandingAtSale`: for sales IN this range, their own `total -
+ * paid`, reduced by any SalesReturn actually filed against that SAME sale
+ * (fully traceable via SalesReturn.saleId, so this part is exact). It does
+ * NOT reduce for a standalone "تسجيل سداد" CustomerPayment, because those
+ * settle a customer's AGGREGATE balance across every sale they've ever
+ * made, not any one specific invoice — there is no traceable link from a
+ * payment back to which sale(s) it paid down, so folding it in here would
+ * mean guessing at an allocation the data doesn't actually support. For the
+ * customer's true current balance (which DOES account for those payments),
+ * see the Customers report tab instead — this figure answers a narrower,
+ * but exact, question: "how much credit did sales in this period leave
+ * uncollected, net of what was later returned". This one is intentionally
+ * still matched by the ORIGINAL SALE's return-linkage (via saleId, no date
+ * filter on the return itself) rather than getSalesReturnsBreakdown's
+ * convention — it's a live "how much of this invoice is outstanding right
+ * now" figure, not a period total, so it must reflect every return against
+ * it regardless of when that return happened.
+ */
 export async function getSalesReport({ from, to } = {}) {
-  const [result] = await Sale.aggregate([
+  const [[result], returnsBreakdown] = await Promise.all([
+    Sale.aggregate([
     { $match: dateRangeMatch(from, to) },
     {
       $lookup: {
@@ -180,7 +308,7 @@ export async function getSalesReport({ from, to } = {}) {
           {
             $group: {
               _id: null,
-              revenue: { $sum: '$total' },
+              grossSales: { $sum: '$total' },
               invoiceCount: { $sum: 1 },
               cashTotal: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'cash'] }, '$total', 0] } },
               creditTotal: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'credit'] }, '$total', 0] } },
@@ -195,23 +323,32 @@ export async function getSalesReport({ from, to } = {}) {
             $group: {
               _id: '$items.productId',
               name: { $first: '$items.name' },
-              qty: { $sum: '$items.quantity' },
+              grossSold: { $sum: '$items.quantity' },
               total: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
             },
           },
-          { $sort: { qty: -1 } },
+          { $sort: { grossSold: -1 } },
           { $limit: 5 },
         ],
       },
     },
+    ]),
+    getSalesReturnsBreakdown(from, to),
   ]);
 
   const overall = result.overall[0] || {
-    revenue: 0, invoiceCount: 0, cashTotal: 0, creditTotal: 0, paid: 0, creditOutstandingAtSale: 0,
+    grossSales: 0, invoiceCount: 0, cashTotal: 0, creditTotal: 0, paid: 0, creditOutstandingAtSale: 0,
   };
+  const { salesReturns, byProduct } = returnsBreakdown;
+
   return {
     ...overall,
-    bestSellers: result.bestSellers.map((b) => ({ productId: b._id, name: b.name, qty: b.qty, total: b.total })),
+    salesReturns,
+    netSales: round2(overall.grossSales - salesReturns),
+    bestSellers: result.bestSellers.map((b) => {
+      const returned = byProduct.get(b._id.toString()) || 0;
+      return { productId: b._id, name: b.name, grossSold: b.grossSold, returned, netSold: b.grossSold - returned, total: b.total };
+    }),
   };
 }
 
@@ -264,17 +401,29 @@ export async function getPurchasesReport({ from, to } = {}) {
 /**
  * Profit tab: revenue and cost-of-goods-sold for the range.
  *
- * `revenue` is summed from each sale's own `total` (post-discount — the
+ * `grossSales` is summed from each sale's own `total` (post-discount — the
  * actual amount invoiced), NOT from `items.price * items.quantity`: a flat
  * invoice-level discount (see the Sale model) is never distributed across
  * lines, so summing the lines directly would overstate revenue by the total
- * discount given in the range. `cogs` has no such concept and is still
- * summed from the lines. Both are computed in one aggregation via `$facet`
- * (one branch unwinds for cogs, the other doesn't) to keep this a single
- * range scan over Sale.
+ * discount given in the range. `grossCogs` has no such concept and is still
+ * summed from the lines.
+ *
+ * `salesReturns`/`returnedCogs` come from the shared getSalesReturnsBreakdown
+ * (see its own docstring for the date convention — matched by the RETURN's
+ * own date, not the date of the sale it's against — and for why
+ * `returnedCogs` is pulled from the original sale's frozen cost snapshot,
+ * never Product's current purchasePrice). Using the same helper as
+ * getSalesReport is what keeps Sales and Profit tabs from ever disagreeing
+ * on "how much got returned this period".
+ *
+ * `netRevenue` = grossSales − salesReturns (same figure as getSalesReport's
+ * netSales). `netCogs` = grossCogs − returnedCogs. `grossProfit` is built
+ * from those NET figures (netRevenue − netCogs), not from the gross ones —
+ * a returned unit's margin no longer counts as profit once it's back on
+ * the shelf. `net` (net profit) = grossProfit − expenses, unchanged.
  */
 export async function getProfitReport({ from, to } = {}) {
-  const [[salesAgg], [expenseAgg]] = await Promise.all([
+  const [[salesAgg], [expenseAgg], returnsBreakdown] = await Promise.all([
     Sale.aggregate([
       { $match: dateRangeMatch(from, to) },
       {
@@ -298,16 +447,32 @@ export async function getProfitReport({ from, to } = {}) {
       { $match: dateRangeMatch(from, to) },
       { $group: { _id: null, sum: { $sum: '$amount' } } },
     ]),
+    getSalesReturnsBreakdown(from, to),
   ]);
 
-  const revenue = salesAgg?.revenue || 0;
+  const grossSales = salesAgg?.revenue || 0;
   const discount = salesAgg?.discount || 0;
-  const cogs = salesAgg?.cogs || 0;
-  const gross = revenue - cogs;
+  const grossCogs = salesAgg?.cogs || 0;
+  const { salesReturns, returnedCogs } = returnsBreakdown;
+  const netRevenue = round2(grossSales - salesReturns);
+  const netCogs = round2(grossCogs - returnedCogs);
+  const grossProfit = round2(netRevenue - netCogs);
   const expenses = expenseAgg?.sum || 0;
 
-  return { revenue, discount, cogs, gross, expenses, net: gross - expenses };
+  return {
+    grossSales,
+    discount,
+    salesReturns,
+    netRevenue,
+    grossCogs,
+    returnedCogs,
+    netCogs,
+    grossProfit,
+    expenses,
+    net: round2(grossProfit - expenses),
+  };
 }
+
 
 /**
  * Inventory tab: a snapshot of the CURRENT catalog — never date-filtered.
