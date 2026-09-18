@@ -7,6 +7,16 @@ const supplierSchema = new Schema(
     name: { type: String, required: true, trim: true, maxlength: 200 },
     phone: { type: String, default: '', trim: true, maxlength: 30 },
     address: { type: String, default: '', trim: true, maxlength: 300 },
+    // Same field/semantics as Customer.openingBalance (see its docstring) —
+    // 'they_owe_us' here means the SUPPLIER owes the shop from before (rare
+    // but possible), 'we_owe_them' means the shop owes the supplier from
+    // before (the common case — unpaid balance carried over from paper
+    // books). Set once at onboarding or corrected only through
+    // supplierOpeningBalance.service.js's guarded path.
+    openingBalance: {
+      amount: { type: Number, min: 0, default: 0 },
+      direction: { type: String, enum: ['they_owe_us', 'we_owe_them'], default: 'we_owe_them' },
+    },
   },
   { timestamps: true },
 );

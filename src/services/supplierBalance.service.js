@@ -1,4 +1,5 @@
 import Purchase from '../models/Purchase.js';
+import Supplier from '../models/Supplier.js';
 import SupplierPayment from '../models/SupplierPayment.js';
 import PurchaseReturn from '../models/PurchaseReturn.js';
 import SupplierCreditReceipt from '../models/SupplierCreditReceipt.js';
@@ -19,6 +20,7 @@ export async function getSupplierRemaining(supplierId, session) {
     PaymentModel: SupplierPayment,
     ReturnModel: PurchaseReturn,
     PayoutModel: SupplierCreditReceipt,
+    PersonModel: Supplier,
     refField: 'supplierId',
     personId: supplierId,
     session,

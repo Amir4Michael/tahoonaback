@@ -8,6 +8,11 @@ import { asyncHandler } from '../middleware/asyncHandler.js';
 // Two separate schemas (not create.partial()) for the same reason as
 // Products: a partial derived from a schema with .default(...) would inject
 // defaults for fields the client didn't send on a PATCH.
+const openingBalanceInputSchema = z.object({
+  amount: z.coerce.number().min(0, 'قيمة الرصيد الافتتاحي يجب ألا تكون سالبة'),
+  direction: z.enum(['they_owe_us', 'we_owe_them']),
+});
+
 const createSchema = z.object({
   name: z.string().trim().min(1, 'أدخل الاسم').max(200),
   phone: z.string().trim().max(30).default(''),
@@ -16,12 +21,26 @@ const createSchema = z.object({
   // "yes, add it anyway" in response to a 409 POSSIBLE_DUPLICATE — see
   // personService.js's create(). Never set on a normal first submission.
   allowDuplicate: z.boolean().optional().default(false),
+  // Only accepted here, at creation — see personService.js's create() and
+  // setOpeningBalance() docstrings for why this can never reach the
+  // regular update() path (updateSchema below deliberately has no
+  // matching field at all).
+  openingBalance: openingBalanceInputSchema.optional(),
 });
 
 const updateSchema = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   phone: z.string().trim().max(30).optional(),
   address: z.string().trim().max(300).optional(),
+});
+
+// The ONLY schema that can touch openingBalance after creation — `reason`
+// is mandatory (not optional) on purpose, matching setOpeningBalance's own
+// requirement: this is a correction, not a routine field edit.
+const setOpeningBalanceSchema = z.object({
+  amount: z.coerce.number().min(0, 'قيمة الرصيد الافتتاحي يجب ألا تكون سالبة'),
+  direction: z.enum(['they_owe_us', 'we_owe_them']),
+  reason: z.string().trim().min(1, 'لازم تكتب سبب التصحيح').max(500),
 });
 
 const listQuerySchema = z.object({
@@ -53,13 +72,20 @@ export function createPersonRouter(service) {
   }));
 
   router.post('/', validateBody(createSchema), asyncHandler(async (req, res) => {
-    const { allowDuplicate, ...data } = req.body;
-    const person = await service.create(data, { allowDuplicate });
+    const { allowDuplicate, openingBalance, ...data } = req.body;
+    const person = await service.create(data, { allowDuplicate, openingBalance });
     res.status(201).json({ success: true, data: person });
   }));
 
   router.patch('/:id', validateObjectIdParam(), validateBody(updateSchema), asyncHandler(async (req, res) => {
     const person = await service.update(req.params.id, req.body);
+    res.json({ success: true, data: person });
+  }));
+
+  // Deliberately separate from the regular PATCH above — see
+  // personService.js's setOpeningBalance docstring for why.
+  router.patch('/:id/opening-balance', validateObjectIdParam(), validateBody(setOpeningBalanceSchema), asyncHandler(async (req, res) => {
+    const person = await service.setOpeningBalance(req.params.id, req.body);
     res.json({ success: true, data: person });
   }));
 
