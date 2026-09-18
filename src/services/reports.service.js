@@ -8,6 +8,8 @@ import CustomerPayment from '../models/CustomerPayment.js';
 import SupplierPayment from '../models/SupplierPayment.js';
 import SalesReturn from '../models/SalesReturn.js';
 import PurchaseReturn from '../models/PurchaseReturn.js';
+import CustomerCreditPayout from '../models/CustomerCreditPayout.js';
+import SupplierCreditReceipt from '../models/SupplierCreditReceipt.js';
 import { cairoRangeMatch } from '../utils/timezone.js';
 import { round2 } from '../models/shared/money.js';
 
@@ -40,18 +42,44 @@ function dateRangeMatch(from, to) {
  * selectors, which are always all-time balances regardless of any report
  * period selected elsewhere on the page.
  *
- * `PaymentModel`/`ReturnModel` are optional and, when passed, are folded
- * into `paid`/`remaining` here using the EXACT SAME formula as
- * `personService.getTotals` (standalone settlements reduce `remaining`
- * directly; returns reduce it too and are floored at 0, with any excess
- * ignored here — this report only ever needs `remaining`, never a
- * `creditOwed` figure). This keeps the Reports page's numbers from ever
- * drifting out of sync with what Customer/Supplier Details shows for the
- * same person — the bug this fixes was exactly that drift: a customer who
- * had paid down their balance via a standalone payment, or had goods
- * returned, still showed their old, pre-payment/pre-return balance here.
+ * This MUST stay the exact same formula as personService.js's getTotals/
+ * list — same terms, same signs, same floor-at-0 — since both read the
+ * same underlying Sale/Purchase/Payment/Return/Payout/openingBalance data
+ * for the same person and must never be allowed to drift into disagreeing
+ * with each other again (see this function's own fix history: it already
+ * missed PaymentModel/ReturnModel once, then — after those were added —
+ * missed PayoutModel and openingBalance when THOSE were added elsewhere.
+ * The lesson standing behind that history, in
+ * /decisions-and-learnings.md: this project computes the same
+ * customer/supplier balance in three independent places — this one,
+ * personService.js's getTotals/list, and personBalance.service.js's
+ * getPersonRemaining — and every term added to the formula has to be added
+ * to all three in the same change, not "the two that came to mind first").
+ *
+ * `PaymentModel`/`ReturnModel`/`PayoutModel` are optional and, when passed,
+ * are folded into `paid`/`remaining` here using that same formula
+ * (standalone settlements reduce `remaining` directly; returns reduce it
+ * too; a payout/receipt — money the shop has since paid out or received
+ * against a creditOwed balance, see CustomerCreditPayout.js /
+ * SupplierCreditReceipt.js — adds back, the same "opposite direction from
+ * returns" logic personBalance.service.js's own doc block explains). All
+ * three floored together at 0 — this report only ever needs `remaining`,
+ * never a `creditOwed` figure.
+ *
+ * `openingBalance` (read directly off the person document, always present
+ * as a schema default even when unset) is folded in as the STARTING term,
+ * signed relative to `openingBalancePositiveDirection` — 'they_owe_us' for
+ * Customer, 'we_owe_them' for Supplier (opposite labels — see
+ * personBalance.service.js's getPersonRemaining for the full explanation of
+ * why, and for the confirmed bug this parameterization fixes: a customer's
+ * raw remaining is positive when THEY owe MORE, a supplier's is positive
+ * when WE owe MORE, so the same direction label pushes them opposite ways).
+ * See Customer.js/Supplier.js for why this can never be a Sale/Purchase/
+ * CashboxTransaction — it must never appear in any OTHER report (Sales/
+ * Purchases/Profit/Inventory all remain completely untouched by it), only
+ * in this one person's own balance.
  */
-async function getPersonBalanceReport(Model, TransactionModel, refField, limit, PaymentModel, ReturnModel) {
+async function getPersonBalanceReport(Model, TransactionModel, refField, limit, PaymentModel, ReturnModel, PayoutModel, openingBalancePositiveDirection) {
   const pipeline = [
     {
       $lookup: {
@@ -97,25 +125,50 @@ async function getPersonBalanceReport(Model, TransactionModel, refField, limit, 
     );
   }
 
+  if (PayoutModel) {
+    pipeline.push(
+      {
+        $lookup: {
+          from: PayoutModel.collection.name,
+          localField: '_id',
+          foreignField: refField,
+          as: '_payouts',
+        },
+      },
+      { $addFields: { paidOut: { $sum: '$_payouts.amount' } } },
+    );
+  }
+
   pipeline.push({
     $addFields: {
-      remaining: ReturnModel
-        ? { $subtract: [{ $subtract: ['$total', '$paid'] }, '$returned'] }
-        : { $subtract: ['$total', '$paid'] },
+      remaining: {
+        $add: [
+          ReturnModel
+            ? { $subtract: [{ $subtract: ['$total', '$paid'] }, '$returned'] }
+            : { $subtract: ['$total', '$paid'] },
+          PayoutModel ? '$paidOut' : 0,
+          // Opening balance — same signed contribution as
+          // personService.js/personBalance.service.js, relative to
+          // openingBalancePositiveDirection.
+          {
+            $cond: [
+              { $eq: ['$openingBalance.direction', openingBalancePositiveDirection] },
+              { $ifNull: ['$openingBalance.amount', 0] },
+              { $multiply: [{ $ifNull: ['$openingBalance.amount', 0] }, -1] },
+            ],
+          },
+        ],
+      },
     },
   });
 
-  if (ReturnModel) {
-    // Same floor-at-0 as personService.getTotals: a return can legitimately
-    // push the raw remaining negative (return eligibility is quantity-based
-    // only). This report only surfaces `remaining`, so the excess is simply
-    // not counted as outstanding — it never displayed a creditOwed figure
-    // before this fix either, so that stays out of scope here.
-    pipeline.push({ $addFields: { remaining: { $cond: [{ $lt: ['$remaining', 0] }, 0, '$remaining'] } } });
-  }
+  // Floor at 0 — always applied now (opening balance alone, even with no
+  // ReturnModel/PayoutModel, can push remaining negative), matching
+  // personService.js's own unconditional floor for the same reason.
+  pipeline.push({ $addFields: { remaining: { $cond: [{ $lt: ['$remaining', 0] }, 0, '$remaining'] } } });
 
   pipeline.push(
-    { $project: { _tx: 0, _payments: 0, _returns: 0 } },
+    { $project: { _tx: 0, _payments: 0, _returns: 0, _payouts: 0 } },
     {
       $facet: {
         summary: [
@@ -391,7 +444,7 @@ export async function getPurchasesReport({ from, to } = {}) {
         },
       },
     ]),
-    getPersonBalanceReport(Supplier, Purchase, 'supplierId', FULL_LIST_SAFETY_CAP, SupplierPayment, PurchaseReturn),
+    getPersonBalanceReport(Supplier, Purchase, 'supplierId', FULL_LIST_SAFETY_CAP, SupplierPayment, PurchaseReturn, SupplierCreditReceipt, 'we_owe_them'),
   ]);
 
   const overall = overallResult[0] || { total: 0, count: 0, paid: 0, creditOutstandingAtPurchase: 0 };
@@ -567,11 +620,11 @@ export async function getInventoryReport() {
 }
 
 export async function getCustomersReport({ limit = 8 } = {}) {
-  const { count, totalOutstanding, withBalanceCount, top } = await getPersonBalanceReport(Customer, Sale, 'customerId', limit, CustomerPayment, SalesReturn);
+  const { count, totalOutstanding, withBalanceCount, top } = await getPersonBalanceReport(Customer, Sale, 'customerId', limit, CustomerPayment, SalesReturn, CustomerCreditPayout, 'they_owe_us');
   return { count, totalOutstanding, withBalanceCount, topCustomers: top };
 }
 
 export async function getSuppliersReport({ limit = 8 } = {}) {
-  const { count, totalOutstanding, withBalanceCount, top } = await getPersonBalanceReport(Supplier, Purchase, 'supplierId', limit, SupplierPayment, PurchaseReturn);
+  const { count, totalOutstanding, withBalanceCount, top } = await getPersonBalanceReport(Supplier, Purchase, 'supplierId', limit, SupplierPayment, PurchaseReturn, SupplierCreditReceipt, 'we_owe_them');
   return { count, totalOutstanding, withBalanceCount, topSuppliers: top };
 }

@@ -21,6 +21,14 @@ export async function getSupplierRemaining(supplierId, session) {
     ReturnModel: PurchaseReturn,
     PayoutModel: SupplierCreditReceipt,
     PersonModel: Supplier,
+    // 'we_owe_them' (the shop owes the supplier) is the SAME polarity as
+    // Purchase.total - Purchase.paid being positive — the OPPOSITE label
+    // from the customer side (see getPersonRemaining's own docstring for
+    // why: raw positive means "they owe us" for a customer, but "we owe
+    // them" for a supplier). This was the confirmed bug: before this fix,
+    // this line read 'they_owe_us' (copied from the customer wrapper),
+    // which silently inverted every supplier opening balance.
+    openingBalancePositiveDirection: 'we_owe_them',
     refField: 'supplierId',
     personId: supplierId,
     session,

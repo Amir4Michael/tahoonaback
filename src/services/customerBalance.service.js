@@ -21,6 +21,10 @@ export async function getCustomerRemaining(customerId, session) {
     ReturnModel: SalesReturn,
     PayoutModel: CustomerCreditPayout,
     PersonModel: Customer,
+    // 'they_owe_us' (the customer owes the shop) is the SAME polarity as
+    // Sale.total - Sale.paid being positive — see getPersonRemaining's own
+    // docstring for why this differs from the supplier side.
+    openingBalancePositiveDirection: 'they_owe_us',
     refField: 'customerId',
     personId: customerId,
     session,

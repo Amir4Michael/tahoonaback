@@ -23,6 +23,9 @@ export const supplierService = createPersonService({
   // (see SupplierCreditReceipt.js / supplierCreditReceipt.service.js) —
   // brings creditOwed back down once the supplier actually settles it.
   PayoutModel: SupplierCreditReceipt,
+  // See personService.js's createPersonService doc block for why this is
+  // the OPPOSITE value from Customer's — this was the confirmed bug.
+  openingBalancePositiveDirection: 'we_owe_them',
   labels: {
     notFound: 'المورد غير موجود',
     deleteBlocked: 'لا يمكن حذف مورد له عمليات شراء مسجلة',

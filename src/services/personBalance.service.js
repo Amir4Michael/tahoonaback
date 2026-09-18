@@ -28,21 +28,38 @@ import { round2 } from '../models/shared/money.js';
  *
  * `PersonModel` (Customer or Supplier — needed to read `openingBalance`,
  * see those models' own docstrings): folded in as the STARTING term of the
- * whole formula, signed the same way a real transaction would be —
- * 'they_owe_us' contributes positively (same direction as an unpaid sale/
- * purchase), 'we_owe_them' contributes negatively (same direction as a
- * payout/receipt). This is what makes an opening balance behave exactly
+ * whole formula, signed relative to `openingBalancePositiveDirection` (see
+ * that param below) — this is what makes an opening balance behave exactly
  * like "one more historical transaction" for every consumer of this
  * function, without it actually being a Sale/Purchase/CashboxTransaction —
  * see Customer.js/Supplier.js's own docstrings for why that matters (it
  * must never touch the cashbox or any sales/profit figure).
+ *
+ * `openingBalancePositiveDirection` (required whenever `PersonModel` is
+ * passed): which of Customer.js/Supplier.js's two `openingBalance.direction`
+ * values should contribute POSITIVELY to this raw figure — i.e. push it the
+ * same way an ordinary unpaid transaction already does. This is NOT the
+ * same value for Customer and Supplier, because "raw positive" itself means
+ * opposite things for the two: for a customer it's built from
+ * `Sale.total - Sale.paid`, positive when THEY owe US more, so
+ * `'they_owe_us'` is what should add. For a supplier it's built from
+ * `Purchase.total - Purchase.paid`, positive when WE owe THEM more, so
+ * `'we_owe_them'` is what should add — the opposite label from the
+ * customer case. Passing the wrong one silently flips every opening
+ * balance's effect for that person type (a real, confirmed bug this
+ * comment exists to prevent recurring — see
+ * /decisions-and-learnings.md): a supplier opening balance recorded as
+ * "the shop owes the supplier" would otherwise show up as the supplier
+ * owing the shop instead. customerBalance.service.js /
+ * supplierBalance.service.js each hardcode the correct value for their own
+ * entity type so this can never be passed wrong from a call site.
  *
  * `session` is required (not optional) — every caller runs inside a
  * transaction anyway (see withTransaction in the callers), and a balance
  * check for money movement outside a transaction would defeat the whole
  * point of reading it consistently with the write that follows.
  */
-export async function getPersonRemaining({ TransactionModel, PaymentModel, ReturnModel, PayoutModel, PersonModel, refField, personId, session }) {
+export async function getPersonRemaining({ TransactionModel, PaymentModel, ReturnModel, PayoutModel, PersonModel, openingBalancePositiveDirection, refField, personId, session }) {
   const [txAgg] = await TransactionModel.aggregate([
     { $match: { [refField]: personId } },
     { $group: { _id: null, total: { $sum: '$total' }, paid: { $sum: '$paid' } } },
@@ -75,7 +92,7 @@ export async function getPersonRemaining({ TransactionModel, PaymentModel, Retur
   if (PersonModel) {
     const person = await PersonModel.findById(personId).select('openingBalance').session(session);
     const ob = person?.openingBalance;
-    if (ob?.amount) openingBalanceSigned = ob.direction === 'we_owe_them' ? -ob.amount : ob.amount;
+    if (ob?.amount) openingBalanceSigned = ob.direction === openingBalancePositiveDirection ? ob.amount : -ob.amount;
   }
 
   return round2(openingBalanceSigned + txTotal - txPaid - priorPayments - priorReturns + priorPayouts);

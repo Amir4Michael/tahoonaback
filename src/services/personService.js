@@ -61,8 +61,19 @@ function escapeRegex(str) {
  * See services/customerBalance.service.js / supplierBalance.service.js for
  * the exact same formula used inside a transaction when validating a new
  * payment/return/payout.
+ *
+ * `openingBalancePositiveDirection`: which of Customer.js/Supplier.js's two
+ * `openingBalance.direction` values should push `remaining` UP for this
+ * entity type — 'they_owe_us' for Customer, 'we_owe_them' for Supplier (the
+ * opposite label — a customer's raw remaining is positive when THEY owe
+ * MORE, a supplier's is positive when WE owe MORE, so the same label would
+ * mean opposite things). See personBalance.service.js's getPersonRemaining
+ * for the full explanation — this was a confirmed, fixed bug where the
+ * supplier side briefly used the customer's polarity and silently inverted
+ * every supplier opening balance. customer.service.js / supplier.service.js
+ * each hardcode the correct value for their own entity type.
  */
-export function createPersonService({ Model, TransactionModel, refField, activityType, entityType, labels, PaymentModel, ReturnModel, PayoutModel }) {
+export function createPersonService({ Model, TransactionModel, refField, activityType, entityType, labels, PaymentModel, ReturnModel, PayoutModel, openingBalancePositiveDirection }) {
   async function getTotals(personId) {
     const [result] = await TransactionModel.aggregate([
       { $match: { [refField]: new mongoose.Types.ObjectId(personId) } },
@@ -113,21 +124,21 @@ export function createPersonService({ Model, TransactionModel, refField, activit
     // Opening balance (see Customer.js/Supplier.js) — folded in as a
     // starting term, exactly like personBalance.service.js's
     // getPersonRemaining does for the live/transactional version of this
-    // same formula. 'they_owe_us' pushes remaining up (same direction as
-    // an unpaid transaction); 'we_owe_them' pushes it down (same direction
-    // as a return/payout).
+    // same formula. Signed relative to `openingBalancePositiveDirection`
+    // (see this factory's own param docs below for why Customer and
+    // Supplier need opposite values here — this was a confirmed, fixed bug).
     const person = await Model.findById(personId).select('openingBalance');
     const ob = person?.openingBalance;
     if (ob?.amount) {
       base.openingBalance = { amount: ob.amount, direction: ob.direction };
-      base.remaining += ob.direction === 'we_owe_them' ? -ob.amount : ob.amount;
+      base.remaining += ob.direction === openingBalancePositiveDirection ? ob.amount : -ob.amount;
     }
 
     // Floor at 0 + surface any excess as creditOwed — see the doc block
     // above. A safe no-op whenever nothing pushed remaining negative
     // (plain Sale/Purchase totals or CustomerPayment/SupplierPayment alone
     // never can — see the doc block above for what can: returns, payouts,
-    // and now a 'we_owe_them' opening balance).
+    // and now an opening balance in the "owed to them" direction).
     base.creditOwed = base.remaining < 0 ? round2(-base.remaining) : 0;
     base.remaining = base.remaining < 0 ? 0 : round2(base.remaining);
 
@@ -237,8 +248,9 @@ export function createPersonService({ Model, TransactionModel, refField, activit
         },
       },
       // Opening balance (see Customer.js/Supplier.js) — same signed
-      // contribution as getTotals/getPersonRemaining: 'they_owe_us' adds,
-      // 'we_owe_them' subtracts.
+      // contribution as getTotals/getPersonRemaining, relative to
+      // `openingBalancePositiveDirection` (see this factory's own doc
+      // block for why Customer and Supplier need opposite values here).
       {
         $addFields: {
           'totals.remaining': {
@@ -246,9 +258,9 @@ export function createPersonService({ Model, TransactionModel, refField, activit
               '$totals.remaining',
               {
                 $cond: [
-                  { $eq: ['$openingBalance.direction', 'we_owe_them'] },
-                  { $multiply: [{ $ifNull: ['$openingBalance.amount', 0] }, -1] },
+                  { $eq: ['$openingBalance.direction', openingBalancePositiveDirection] },
                   { $ifNull: ['$openingBalance.amount', 0] },
+                  { $multiply: [{ $ifNull: ['$openingBalance.amount', 0] }, -1] },
                 ],
               },
             ],
